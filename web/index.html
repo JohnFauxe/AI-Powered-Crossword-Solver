@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crosswords</title>
+<link rel="stylesheet" href="css/app.css">
+<script src="js/theme-init.js"></script>
+<script type="module" src="js/list.js"></script>
+</head>
+<body>
+<div class="page">
+  <header class="head">
+    <div>
+      <h1>Crosswords</h1>
+      <div class="byline">Stored on this computer</div>
+    </div>
+    <button class="btn ghost" id="theme" type="button">Theme</button>
+  </header>
+
+  <section class="drop" id="drop" aria-label="Add a puzzle">
+    <p>Drop a .puz, .ipuz or .json file, or <button type="button" class="linkish" id="choose">choose one</button></p>
+    <input type="file" id="file" accept=".puz,.ipuz,.json,application/json" multiple hidden>
+    <div class="upload-status" id="upload-status" role="status"></div>
+  </section>
+
+  <h2 id="list-h">Puzzles</h2>
+  <ul class="cards" id="cards" aria-labelledby="list-h"></ul>
+  <p class="empty-list" id="empty" hidden>No puzzles yet. Drop a .puz file here to start.</p>
+</div>
+</body>
+</html>

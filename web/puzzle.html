@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crossword</title>
+<link rel="stylesheet" href="css/app.css">
+<script src="js/theme-init.js"></script>
+<script type="module" src="js/puzzle.js"></script>
+</head>
+<body>
+<div class="page">
+  <header class="head">
+    <div>
+      <a class="back" href="./">← All puzzles</a>
+      <h1 id="title">Loading…</h1>
+      <div class="byline"><span id="byline"></span><span id="timer" aria-label="Time"></span></div>
+    </div>
+    <button class="btn ghost" id="theme" type="button">Theme</button>
+  </header>
+
+  <section class="solver" aria-label="Solver">
+    <div class="solver-row">
+      <div class="seg" role="group" aria-label="Solving mode">
+        <button type="button" id="m-model" aria-pressed="true"><span class="dot model" aria-hidden="true"></span>Model</button>
+        <button type="button" id="m-lookup" aria-pressed="false"><span class="dot lookup" aria-hidden="true"></span>Lookup</button>
+      </div>
+      <button type="button" class="btn primary" id="solve">Solve</button>
+      <span class="status" id="status" role="status"></span>
+    </div>
+    <div class="runs">
+      <div class="run" id="run-model"></div>
+      <div class="run" id="run-lookup"></div>
+    </div>
+    <label class="check diff-toggle"><input type="checkbox" id="diff" disabled> Show disagreements</label>
+    <div class="solver-progress" hidden></div>
+  </section>
+
+  <div class="main" id="main" hidden>
+    <div class="board-col">
+      <div class="cluebar" id="cluebar">
+        <button type="button" class="nav" id="prev-clue" aria-label="Previous clue">‹</button>
+        <div class="cb-text" aria-live="polite"><span class="n"></span><span class="t"></span></div>
+        <button type="button" class="nav" id="next-clue" aria-label="Next clue">›</button>
+      </div>
+      <div class="popover" id="suggest-pop" role="dialog" hidden></div>
+      <div class="board" id="board">
+        <input class="kbd-input" id="kbd" type="text" aria-label="Type a letter"
+               autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false"
+               enterkeyhint="next" tabindex="-1">
+      </div>
+      <div class="actions">
+        <div class="menu-wrap"><button type="button" class="btn" id="check-btn">Check ▾</button></div>
+        <div class="menu-wrap"><button type="button" class="btn" id="reveal-btn">Reveal ▾</button></div>
+        <button type="button" class="btn" id="suggest-btn" aria-haspopup="dialog" aria-controls="suggest-pop">Suggest</button>
+        <div class="menu-wrap"><button type="button" class="btn ghost" id="clear-btn">Clear ▾</button></div>
+      </div>
+      <p class="notice" id="notice" hidden></p>
+    </div>
+    <div class="clues" id="clues"></div>
+  </div>
+  <p class="notice warn" id="load-error" hidden></p>
+</div>
+</body>
+</html>

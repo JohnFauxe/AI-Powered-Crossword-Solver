@@ -313,7 +313,7 @@ def test_cli_convert(tmp_path, capsys):
     assert cli.main(["show", str(tmp_path / "nope.puz")]) == 1
 
 
-@pytest.mark.parametrize("cmd", [["serve"], ["solve", "x.json"], ["eval", "folder"]])
+@pytest.mark.parametrize("cmd", [["solve", "x.json"], ["eval", "folder"]])
 def test_cli_stubs(cmd, capsys):
     assert cli.main(cmd) == 2
     assert "not implemented yet" in capsys.readouterr().err

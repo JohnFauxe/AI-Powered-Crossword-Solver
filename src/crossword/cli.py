@@ -75,6 +75,16 @@ def cmd_convert(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    from crossword.server.app import create_app
+
+    print(f"Serving on http://127.0.0.1:{args.port}/")
+    uvicorn.run(create_app(), host="127.0.0.1", port=args.port, log_level="warning")
+    return 0
+
+
 def cmd_not_implemented(args: argparse.Namespace) -> int:
     print(f"crossword {args.command}: not implemented yet", file=sys.stderr)
     return 2
@@ -98,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="run the web app on 127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
-    p.set_defaults(func=cmd_not_implemented)
+    p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("solve", help="solve a puzzle and print the fill")
     p.add_argument("file")
