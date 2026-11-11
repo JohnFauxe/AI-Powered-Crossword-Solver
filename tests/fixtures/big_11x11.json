@@ -1,0 +1,269 @@
+{
+  "version": 1,
+  "meta": {
+    "title": "Clever Moves",
+    "author": "Test Fixtures",
+    "source": "original",
+    "date": "2026-11-12"
+  },
+  "width": 11,
+  "height": 11,
+  "grid": [
+    "....#...###",
+    "....#......",
+    "...........",
+    "...#...#...",
+    "###...#....",
+    ".....#.....",
+    "....#...###",
+    "...#...#...",
+    "...........",
+    "......#....",
+    "###...#...."
+  ],
+  "clues": [
+    {
+      "number": 1,
+      "direction": "across",
+      "text": "Box for practice"
+    },
+    {
+      "number": 1,
+      "direction": "down",
+      "text": "Jump-rope move"
+    },
+    {
+      "number": 2,
+      "direction": "down",
+      "text": "Evergreen tree"
+    },
+    {
+      "number": 3,
+      "direction": "down",
+      "text": "Bit of pond scum"
+    },
+    {
+      "number": 4,
+      "direction": "down",
+      "text": "Fish eggs"
+    },
+    {
+      "number": 5,
+      "direction": "across",
+      "text": "Unit of work in physics"
+    },
+    {
+      "number": 5,
+      "direction": "down",
+      "text": "Long heroic poems"
+    },
+    {
+      "number": 6,
+      "direction": "down",
+      "text": "Cheer (for)"
+    },
+    {
+      "number": 7,
+      "direction": "down",
+      "text": "Wildebeest"
+    },
+    {
+      "number": 8,
+      "direction": "across",
+      "text": "Thousand grams"
+    },
+    {
+      "number": 9,
+      "direction": "across",
+      "text": "Small horses"
+    },
+    {
+      "number": 10,
+      "direction": "down",
+      "text": "Magazine edition"
+    },
+    {
+      "number": 11,
+      "direction": "down",
+      "text": "Top tier"
+    },
+    {
+      "number": 12,
+      "direction": "down",
+      "text": "Pancake topping"
+    },
+    {
+      "number": 13,
+      "direction": "across",
+      "text": "In a clever, inventive way"
+    },
+    {
+      "number": 14,
+      "direction": "down",
+      "text": "Hammer's target"
+    },
+    {
+      "number": 15,
+      "direction": "across",
+      "text": "Pod resident"
+    },
+    {
+      "number": 16,
+      "direction": "across",
+      "text": "Play division"
+    },
+    {
+      "number": 17,
+      "direction": "across",
+      "text": "Knight's title"
+    },
+    {
+      "number": 18,
+      "direction": "across",
+      "text": "Insult, in slang"
+    },
+    {
+      "number": 18,
+      "direction": "down",
+      "text": "Owed"
+    },
+    {
+      "number": 19,
+      "direction": "across",
+      "text": "Ballerina's skirt"
+    },
+    {
+      "number": 19,
+      "direction": "down",
+      "text": "Pair"
+    },
+    {
+      "number": 20,
+      "direction": "across",
+      "text": "Run ___ of (get in trouble with)"
+    },
+    {
+      "number": 20,
+      "direction": "down",
+      "text": "Wide open, as a mouth"
+    },
+    {
+      "number": 21,
+      "direction": "down",
+      "text": "Folder contents"
+    },
+    {
+      "number": 22,
+      "direction": "down",
+      "text": "Done in the open"
+    },
+    {
+      "number": 23,
+      "direction": "across",
+      "text": "Clean with a broom"
+    },
+    {
+      "number": 23,
+      "direction": "down",
+      "text": "Male offspring"
+    },
+    {
+      "number": 24,
+      "direction": "across",
+      "text": "Donate"
+    },
+    {
+      "number": 25,
+      "direction": "across",
+      "text": "Cow's comment"
+    },
+    {
+      "number": 25,
+      "direction": "down",
+      "text": "Scrooge type"
+    },
+    {
+      "number": 26,
+      "direction": "across",
+      "text": "Pub pour"
+    },
+    {
+      "number": 27,
+      "direction": "across",
+      "text": "Transgression"
+    },
+    {
+      "number": 27,
+      "direction": "down",
+      "text": "Location"
+    },
+    {
+      "number": 28,
+      "direction": "across",
+      "text": "Fireplace residue"
+    },
+    {
+      "number": 28,
+      "direction": "down",
+      "text": "Under the covers"
+    },
+    {
+      "number": 29,
+      "direction": "down",
+      "text": "Smelting waste"
+    },
+    {
+      "number": 30,
+      "direction": "down",
+      "text": "\"Present!\""
+    },
+    {
+      "number": 31,
+      "direction": "across",
+      "text": "Allowed by the rules"
+    },
+    {
+      "number": 32,
+      "direction": "down",
+      "text": "Plan out, as a route"
+    },
+    {
+      "number": 33,
+      "direction": "down",
+      "text": "Anger"
+    },
+    {
+      "number": 34,
+      "direction": "across",
+      "text": "Large country property"
+    },
+    {
+      "number": 35,
+      "direction": "across",
+      "text": "Back end"
+    },
+    {
+      "number": 36,
+      "direction": "across",
+      "text": "For each"
+    },
+    {
+      "number": 37,
+      "direction": "across",
+      "text": "Rim"
+    }
+  ],
+  "solution": [
+    "SPAR#ERG###",
+    "KILO#PONIES",
+    "INGENIOUSLY",
+    "PEA#ACT#SIR",
+    "###DIS#TUTU",
+    "AFOUL#SWEEP",
+    "GIVE#MOO###",
+    "ALE#SIN#ASH",
+    "PERMISSIBLE",
+    "ESTATE#REAR",
+    "###PER#EDGE"
+  ]
+}

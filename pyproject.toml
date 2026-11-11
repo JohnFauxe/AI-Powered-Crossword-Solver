@@ -1,0 +1,44 @@
+[project]
+name = "crossword"
+version = "0.1.0"
+description = "Fully local crossword solving app and solver engine"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "puzpy",
+    "httpx",
+]
+
+[project.scripts]
+crossword = "crossword.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "httpx",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crossword"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["crossword"]
+known-local-folder = ["conftest"]

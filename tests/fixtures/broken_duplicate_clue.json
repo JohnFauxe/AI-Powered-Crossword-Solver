@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "meta": {
+    "title": "Quiver Item",
+    "author": "Test Fixtures",
+    "source": "original",
+    "date": "2026-11-12",
+    "notes": "Broken on purpose: 6-Across has two clues."
+  },
+  "width": 5,
+  "height": 5,
+  "grid": [
+    "#...#",
+    ".....",
+    ".....",
+    ".....",
+    "#...#"
+  ],
+  "clues": [
+    {
+      "number": 1,
+      "direction": "across",
+      "text": "Kitten's cry"
+    },
+    {
+      "number": 1,
+      "direction": "down",
+      "text": "Deserve"
+    },
+    {
+      "number": 2,
+      "direction": "down",
+      "text": "Third rock from the sun"
+    },
+    {
+      "number": 3,
+      "direction": "down",
+      "text": "Penned"
+    },
+    {
+      "number": 4,
+      "direction": "across",
+      "text": "Valentine symbol"
+    },
+    {
+      "number": 4,
+      "direction": "down",
+      "text": "Possessed"
+    },
+    {
+      "number": 5,
+      "direction": "down",
+      "text": "Pair"
+    },
+    {
+      "number": 6,
+      "direction": "across",
+      "text": "Quiver item"
+    },
+    {
+      "number": 7,
+      "direction": "across",
+      "text": "“Same here”"
+    },
+    {
+      "number": 8,
+      "direction": "across",
+      "text": "Most common English word"
+    },
+    {
+      "number": 6,
+      "direction": "across",
+      "text": "Archer's projectile"
+    }
+  ],
+  "solution": [
+    "#MEW#",
+    "HEART",
+    "ARROW",
+    "DITTO",
+    "#THE#"
+  ]
+}

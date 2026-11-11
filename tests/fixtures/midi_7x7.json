@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "meta": {
+    "title": "Wind Section",
+    "author": "Test Fixtures",
+    "source": "original",
+    "date": "2026-11-12"
+  },
+  "width": 7,
+  "height": 7,
+  "grid": [
+    "...#...",
+    "...#...",
+    ".......",
+    "##...##",
+    ".......",
+    "...#...",
+    "...#..."
+  ],
+  "clues": [
+    {
+      "number": 1,
+      "direction": "across",
+      "text": "Yoga surface"
+    },
+    {
+      "number": 1,
+      "direction": "down",
+      "text": "Pasture sound"
+    },
+    {
+      "number": 2,
+      "direction": "down",
+      "text": "Rainbow shape"
+    },
+    {
+      "number": 3,
+      "direction": "down",
+      "text": "Swarming (with)"
+    },
+    {
+      "number": 4,
+      "direction": "across",
+      "text": "That woman"
+    },
+    {
+      "number": 4,
+      "direction": "down",
+      "text": "Small scrap of film or text"
+    },
+    {
+      "number": 5,
+      "direction": "down",
+      "text": "Barnyard layer"
+    },
+    {
+      "number": 6,
+      "direction": "down",
+      "text": "Greek letter after zeta"
+    },
+    {
+      "number": 7,
+      "direction": "across",
+      "text": "Mined material"
+    },
+    {
+      "number": 8,
+      "direction": "across",
+      "text": "Tennis court divider"
+    },
+    {
+      "number": 9,
+      "direction": "across",
+      "text": "Small ceramic wind instrument"
+    },
+    {
+      "number": 10,
+      "direction": "down",
+      "text": "Knock at the door"
+    },
+    {
+      "number": 11,
+      "direction": "across",
+      "text": "Atlas page"
+    },
+    {
+      "number": 12,
+      "direction": "across",
+      "text": "Sent by mail or freight"
+    },
+    {
+      "number": 12,
+      "direction": "down",
+      "text": "Small taste"
+    },
+    {
+      "number": 13,
+      "direction": "down",
+      "text": "Weeding tool"
+    },
+    {
+      "number": 14,
+      "direction": "down",
+      "text": "Historical period"
+    },
+    {
+      "number": 15,
+      "direction": "down",
+      "text": "Lion's lair"
+    },
+    {
+      "number": 16,
+      "direction": "across",
+      "text": "Charged particle"
+    },
+    {
+      "number": 17,
+      "direction": "across",
+      "text": "Before, poetically"
+    },
+    {
+      "number": 18,
+      "direction": "across",
+      "text": "Hook for a coat"
+    },
+    {
+      "number": 19,
+      "direction": "across",
+      "text": "Beach bronze"
+    }
+  ],
+  "solution": [
+    "MAT#SHE",
+    "ORE#NET",
+    "OCARINA",
+    "##MAP##",
+    "SHIPPED",
+    "ION#ERE",
+    "PEG#TAN"
+  ],
+  "circles": [
+    [
+      3,
+      2
+    ],
+    [
+      3,
+      3
+    ],
+    [
+      3,
+      4
+    ]
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "meta": {
+    "title": "Short slot",
+    "author": "",
+    "source": "",
+    "date": "",
+    "notes": "Broken on purpose: 1-letter across entries in row 5."
+  },
+  "width": 5,
+  "height": 5,
+  "grid": [
+    "#...#",
+    ".....",
+    ".....",
+    ".....",
+    "#.#.#"
+  ],
+  "clues": [
+    {
+      "number": 1,
+      "direction": "across",
+      "text": "Clue for 1-across"
+    },
+    {
+      "number": 1,
+      "direction": "down",
+      "text": "Clue for 1-down"
+    },
+    {
+      "number": 2,
+      "direction": "down",
+      "text": "Clue for 2-down"
+    },
+    {
+      "number": 3,
+      "direction": "down",
+      "text": "Clue for 3-down"
+    },
+    {
+      "number": 4,
+      "direction": "across",
+      "text": "Clue for 4-across"
+    },
+    {
+      "number": 4,
+      "direction": "down",
+      "text": "Clue for 4-down"
+    },
+    {
+      "number": 5,
+      "direction": "down",
+      "text": "Clue for 5-down"
+    },
+    {
+      "number": 6,
+      "direction": "across",
+      "text": "Clue for 6-across"
+    },
+    {
+      "number": 7,
+      "direction": "across",
+      "text": "Clue for 7-across"
+    }
+  ],
+  "solution": [
+    "#MEW#",
+    "HEART",
+    "ARROW",
+    "DITTO",
+    "#T#E#"
+  ]
+}
