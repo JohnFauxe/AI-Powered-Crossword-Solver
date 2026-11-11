@@ -39,7 +39,8 @@ Out of scope (do not build, but do not block them either):
 - GPU: RTX 3060, 12 GB.
 - Word lists at `/usr/share/dict/american-english` and `british-english`.
 - Project root: `/home/fauxe/.t3/scratch/2026-11-11-plan-with-me-a-crossword-11671384`
-  (currently empty apart from this file). Run `git init`; do not push anywhere.
+  (already a git repo on branch `main`, holding this brief, `DESIGN.md` and
+  the mockup). Commit to `main`; there is no remote, do not add one or push.
 
 ## Stack
 
