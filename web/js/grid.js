@@ -120,8 +120,9 @@ export function renderGrid() {
   const cur = key(S.cur.r, S.cur.c);
   const slot = S.currentSlot();
   const word = new Set(slot ? slot.cells.map(([r, c]) => key(r, c)) : []);
-  const layer = S.layers[S.mode];
-  const showDiff = S.diffActive();
+  const layer = S.shownLayer();
+  const mode = S.shownMode();
+  const other = S.diffActive() ? S.layers[S.compare] : null;
   for (const [k, d] of cells) {
     const user = S.user.get(k);
     const sol = user ? null : layer.get(k);
@@ -133,16 +134,16 @@ export function renderGrid() {
     cls.toggle("long", letter.length > 1);
     cls.toggle("word", word.has(k) && k !== cur);
     cls.toggle("active", k === cur);
-    cls.toggle("s-model", !!sol && S.mode === "model");
-    cls.toggle("s-lookup", !!sol && S.mode === "lookup");
+    cls.toggle("s-model", !!sol && mode === "model");
+    cls.toggle("s-lookup", !!sol && mode === "lookup");
     cls.toggle("c-med", b === "c-med");
     cls.toggle("c-low", b === "c-low");
     cls.toggle("wrong", S.wrong.has(k));
     cls.toggle("revealed", S.revealed.has(k));
     let diff = false;
-    if (showDiff && !user) {
-      const a = S.layers.model.get(k), l = S.layers.lookup.get(k);
-      diff = !!(a && l && a.letter !== l.letter);
+    if (other && !user) {
+      const a = layer.get(k), b2 = other.get(k);
+      diff = !!(a && b2 && a.letter !== b2.letter);
     }
     cls.toggle("diff", diff);
     d.tabIndex = k === cur ? 0 : -1;
@@ -162,12 +163,12 @@ function cellLabel(k, user, sol, b, diff) {
     parts.push(`letter ${user}`);
     if (S.revealed.has(k)) parts.push("revealed");
   } else if (sol) {
-    parts.push(`letter ${sol.letter}`, S.mode, BAND_WORDS[b]);
+    parts.push(`letter ${sol.letter}`, S.shownMode(), BAND_WORDS[b]);
   } else {
     parts.push("empty");
   }
   if (S.wrong.has(k)) parts.push("wrong");
-  if (diff) parts.push("modes disagree");
+  if (diff) parts.push("runs disagree");
   if (S.circles.has(k)) parts.push("circled");
   return parts.join(", ");
 }

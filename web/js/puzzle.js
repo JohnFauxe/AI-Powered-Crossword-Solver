@@ -18,6 +18,8 @@ const SAVE_FAILED = "Couldn't save progress. Retrying.";
 const SENTINEL = "​"; // kept in the hidden input so Backspace has something to delete
 const other = (dir) => (dir === "across" ? "down" : "across");
 
+const EMPTY = new Map();
+
 /** Shared state, read by grid.js, clues.js and solver.js. */
 const S = {
   id: null,
@@ -30,10 +32,12 @@ const S = {
   user: new Map(), // "r,c" -> letter typed (or revealed) by the person
   revealed: new Set(),
   wrong: new Set(),
-  layers: { model: new Map(), lookup: new Map() }, // "r,c" -> {letter, confidence}
-  runs: { model: null, lookup: null },
-  mode: "model",
-  showDiff: false,
+  layers: {}, // run key "mode|model" -> Map("r,c" -> {letter, confidence})
+  runs: [], // stored runs, each {key, mode, model, fill, accuracy, ...}
+  shown: null, // run key whose letters the grid shows
+  compare: null, // run key the shown run is compared against
+  mode: "model", // mode of the next Solve
+  models: [], // models of the next Solve, in order
   cur: { r: 0, c: 0 },
   dir: "across",
   solved: false,
@@ -51,8 +55,14 @@ const S = {
   crossSlot() {
     return this.slotAt(key(this.cur.r, this.cur.c), other(this.dir));
   },
+  shownLayer() {
+    return this.layers[this.shown] || EMPTY;
+  },
+  shownMode() {
+    return this.shown ? this.shown.split("|")[0] : this.mode;
+  },
   diffActive() {
-    return this.showDiff && !!(this.runs.model && this.runs.lookup);
+    return !!(this.compare && this.shown && this.compare !== this.shown && this.layers[this.compare]);
   },
   formatTime() {
     return formatTime(timer.now());
@@ -114,6 +124,7 @@ async function main() {
   checkSolved();
   solver.refreshStatus();
   solver.loadHealth();
+  solver.loadModels();
   solver.loadRuns();
   timer.start();
   S.hiddenInput = wantsHiddenInput();
@@ -363,7 +374,7 @@ function setupActions() {
   ]);
   makeMenu($("clear-btn"), [
     { label: "Clear my letters", action: () => doClear("mine") },
-    { label: "Clear solver letters (this mode)", action: () => doClear("solver") },
+    { label: "Clear the shown run", action: () => doClear("solver") },
     { label: "Clear everything", action: () => doClear("all") },
   ]);
   const notes = [];
@@ -447,8 +458,8 @@ async function doReveal(scope) {
 async function doClear(what) {
   const text = {
     mine: ["Clear all your letters? Solver letters stay.", "Clear my letters"],
-    solver: [`Clear the ${S.mode === "model" ? "Model" : "Lookup"} solver letters? Your letters stay.`, "Clear solver letters"],
-    all: ["Clear everything, your letters and both solver runs?", "Clear everything"],
+    solver: [S.shown ? `Clear the shown run (${solver.runLabel(S.shown)})? Your letters stay.` : "There is no run shown.", "Clear the run"],
+    all: ["Clear everything, your letters and every solver run?", "Clear everything"],
   }[what];
   const ok = await confirmDialog(...text);
   if (!ok) return;
@@ -457,11 +468,8 @@ async function doClear(what) {
     S.wrong.clear();
     S.revealed.clear();
   }
-  if (what === "solver") await solver.clearSolverLetters(S.mode);
-  if (what === "all") {
-    await solver.clearSolverLetters("model");
-    await solver.clearSolverLetters("lookup");
-  }
+  if (what === "solver") await solver.clearRun(S.shown);
+  if (what === "all") await solver.clearAllRuns();
   setSolved(false);
   changed();
   focusBoard();

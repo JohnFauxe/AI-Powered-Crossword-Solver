@@ -1,24 +1,23 @@
-// Solver bar: mode toggle, Solve / Cancel, status line, run summaries, the
-// disagreement checkbox, the solver letter layers and Suggest.
+// Solver bar: mode toggle, model picker, Solve / Cancel, status and warning
+// lines, run cards, "Compare with…", the solver letter layers and Suggest.
 //
-// Entry points for wiring the engine in (see the exports below):
+// A run is one (mode, model) pair. S.runs holds every stored run (from
+// GET /api/puzzles/{id}/runs, see server/app.py public_run), S.layers maps a
+// run key ("model|qwen2.5:7b") to its letters, S.shown is the run whose
+// letters the grid shows and S.compare the run it is compared against
+// (disagreements). S.mode is what the next Solve does; S.models are the
+// models it uses, in the picker's order.
+//
+// Entry points (see the exports below):
 //   initSolver(ctx)            once, from puzzle.js
-//   loadHealth()               refresh which modes are available
-//   loadRuns()                 fetch stored runs, rebuild both solver layers
-//   setMode(mode)              switch the shown mode (never starts a run)
+//   loadHealth() / loadModels() / loadRuns()
+//   setMode(mode)              the mode of the next Solve (never starts a run)
+//   showRun(key)               which run the grid shows
 //   startSolve() / cancelSolve()
-//   handleSolverEvent(ev)      one parsed SSE event: stage | fill | slot | done | error
-//   applyFillEvent(cells, mode?) cells: [{r, c, letter, confidence}]
-//   setRunning(bool, mode?)    Solve becomes Cancel, toggle locked, progress line
-//   setStatus(text)            the one-line status (role=status)
-//   refreshStatus()            back to the default text for the shown mode
-//   setProgress(fraction|null) progress line; null = indeterminate
+//   handleSolverEvent(ev)      one parsed SSE event
+//   setStatus(text) / refreshStatus()
 //   suggest() / renderSuggestions(candidates)
-//   clearSolverLetters(mode)   drop a mode's layer and its stored run
-//
-// The run shape comes from GET /api/puzzles/{id}/runs (see server/app.py
-// public_run): {fill, seconds, rounds, model, status, cells_filled,
-// cells_total, slots_filled, slots_total, accuracy|null}.
+//   clearRun(key) / clearAllRuns()
 
 import * as api from "./api.js";
 import { animateCell, key } from "./grid.js";
@@ -27,21 +26,35 @@ import { closeLayer, openLayerEl } from "./ui.js";
 export const MODES = ["model", "lookup"];
 const NAMES = { model: "Model", lookup: "Lookup" };
 const MODE_KEY = "xw:mode";
+const MODELS_KEY = "xw:models";
+const SHOWN_KEY = "xw:shown:";
+
+export const runKey = (mode, model) => `${mode}|${model}`;
+export const runMode = (k) => (k ? k.split("|")[0] : null);
+export const runModel = (k) => (k ? k.slice(k.indexOf("|") + 1) : null);
 
 let S = null; // shared state
-let ctx = null; // {render, userLettersChanged}
+let ctx = null; // {render, lettersChosen}
 const el = {};
 const availability = {
   model: { available: true, reason: null, hint: null },
   lookup: { available: true, reason: null, hint: null },
 };
-let running = null; // {mode, job, source, filledSlots}
+let models = []; // from /api/models: {name, size, parameters, usable, reason, fits, default}
+let defaultModel = null;
+let running = null; // {job, mode, models, index, count, model, source, stage, waiting}
 let statusOverride = null;
+let waitTimer = null;
+
+function store(k, v) {
+  try { localStorage.setItem(k, v); } catch { /* ignore */ }
+}
+function recall(k) {
+  try { return localStorage.getItem(k); } catch { return null; }
+}
 
 /**
  * ctx: {state, root, render(), lettersChosen(cells)}.
- * `root` is the solver bar <section>; `render` repaints grid and clues;
- * `lettersChosen` writes Suggest picks as user letters.
  */
 export function initSolver(context) {
   ctx = context;
@@ -51,14 +64,17 @@ export function initSolver(context) {
   el.seg = { model: root.querySelector("#m-model"), lookup: root.querySelector("#m-lookup") };
   el.solve = root.querySelector("#solve");
   el.status = root.querySelector("#status");
-  el.cards = { model: root.querySelector("#run-model"), lookup: root.querySelector("#run-lookup") };
-  el.diff = root.querySelector("#diff");
+  el.warn = root.querySelector("#solver-warn");
+  el.runs = root.querySelector("#runs");
+  el.compare = root.querySelector("#compare");
   el.progress = root.querySelector(".solver-progress");
+  el.picker = root.querySelector("#model-btn");
+  el.pickerPop = root.querySelector("#model-pop");
   el.popover = document.querySelector("#suggest-pop");
 
-  let stored = null;
-  try { stored = localStorage.getItem(MODE_KEY); } catch { /* ignore */ }
+  const stored = recall(MODE_KEY);
   S.mode = MODES.includes(stored) ? stored : "model";
+  try { S.models = JSON.parse(recall(MODELS_KEY) || "null") || []; } catch { S.models = []; }
 
   for (const mode of MODES) {
     el.seg[mode].addEventListener("click", () => {
@@ -79,16 +95,28 @@ export function initSolver(context) {
     if (running) cancelSolve();
     else startSolve();
   });
-  el.diff.addEventListener("change", () => {
-    S.showDiff = el.diff.checked;
+  el.compare.addEventListener("change", () => {
+    S.compare = el.compare.value || null;
+    renderRuns();
     ctx.render();
+    refreshStatus();
+  });
+  el.picker.addEventListener("click", () => {
+    if (!el.pickerPop.hidden) closeLayer();
+    else openPicker();
+  });
+  el.picker.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      openPicker();
+    }
   });
   renderBar();
 }
 
 // ------------------------------------------------------------------ status
 
-/** Set the status line. Pass null to go back to the default for the mode. */
+/** Set the status line. Pass null to go back to the default text. */
 export function setStatus(text) {
   statusOverride = text || null;
   el.status.textContent = statusOverride ?? defaultStatus();
@@ -98,24 +126,35 @@ export function refreshStatus() {
   setStatus(null);
 }
 
-function lowCount(mode) {
+function setWarning(text) {
+  el.warn.textContent = text || "";
+  el.warn.hidden = !text;
+}
+
+function lowCount(k) {
   let n = 0;
-  for (const v of S.layers[mode].values()) if (v.confidence < 0.5) n++;
+  for (const v of (S.layers[k] || new Map()).values()) if (v.confidence < 0.5) n++;
   return n;
 }
 
+export function runLabel(k) {
+  return `${NAMES[runMode(k)] || runMode(k)} · ${runModel(k)}`;
+}
+
 function defaultStatus() {
-  const mode = S.mode;
   if (S.solved) return `Solved in ${S.formatTime()}`;
   if (!S.puzzle.solver_supported) return "This puzzle has multi-letter squares. The solver can't fill it yet.";
-  const a = availability[mode];
-  if (!S.runs[mode]) {
+  const a = availability[S.mode];
+  const run = S.runs.find((r) => r.key === S.shown);
+  if (!run) {
     if (!a.available) return a.reason;
-    return `No ${NAMES[mode]} run yet. Press Solve.`;
+    if (S.runs.length) return "Choose a run to show its letters, or press Solve.";
+    return `No ${NAMES[S.mode]} run yet. Press Solve.`;
   }
-  const low = lowCount(mode);
+  const low = lowCount(run.key);
   const tail = low ? ` ${low} low-confidence cell${low === 1 ? "" : "s"}.` : "";
-  return `Showing the ${NAMES[mode]} run.${tail}`;
+  const cmp = S.diffActive() ? ` Marking where it disagrees with ${runLabel(S.compare)}.` : "";
+  return `Showing the ${runLabel(run.key)} run.${tail}${cmp}`;
 }
 
 // ----------------------------------------------------------- availability
@@ -128,11 +167,11 @@ export async function loadHealth() {
       const m = h.modes?.[mode];
       if (m) availability[mode] = { available: !!m.available, reason: m.reason || null, hint: m.hint || null };
     }
-    // A run still going on this puzzle (page reloaded mid-run): follow it again.
+    // A job still going on this puzzle (page reloaded mid-run): follow it again.
     const live = h.running;
-    if (live && live.puzzle === S.id && !running && MODES.includes(live.mode)) {
+    if (live && live.kind === "solve" && live.puzzle === S.id && !running && MODES.includes(live.mode)) {
       if (live.mode !== S.mode) setMode(live.mode);
-      attach(live.job, live.mode);
+      attach(live.job, live.mode, live.models || [live.model]);
     }
   } catch {
     // Health unknown: leave both modes enabled; a solve attempt will say why it fails.
@@ -145,38 +184,167 @@ export async function loadHealth() {
   refreshStatus();
 }
 
+/** Read /api/models; keep the remembered selection where still usable. */
+export async function loadModels() {
+  try {
+    const res = await api.models();
+    models = res.models || [];
+    defaultModel = res.default || null;
+  } catch {
+    models = [];
+  }
+  const usable = new Set(models.filter((m) => m.usable).map((m) => m.name));
+  let chosen = (S.models || []).filter((m) => usable.has(m));
+  if (!chosen.length) chosen = defaultModel && usable.has(defaultModel) ? [defaultModel] : [...usable].slice(0, 1);
+  if (!models.length && defaultModel) chosen = [defaultModel];
+  setModels(chosen, { remember: false });
+}
+
+function setModels(list, { remember = true } = {}) {
+  // Keep the picker's order: that is the order the models solve in.
+  const order = models.map((m) => m.name);
+  S.models = [...list].sort((a, b) => (order.indexOf(a) + 1 || 1e9) - (order.indexOf(b) + 1 || 1e9));
+  if (remember) store(MODELS_KEY, JSON.stringify(S.models));
+  renderBar();
+}
+
+export function fmtBytes(n) {
+  if (!n) return "";
+  const gb = n / 1024 ** 3;
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(n / 1024 ** 2)} MB`;
+}
+
+function openPicker() {
+  if (running) return;
+  const pop = el.pickerPop;
+  const h = document.createElement("h3");
+  h.id = "model-pop-title";
+  h.textContent = "Models to solve with";
+  pop.setAttribute("aria-labelledby", h.id);
+  const list = document.createElement("ul");
+  if (!models.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "No local models found. Start Ollama, or pull a model with: ollama pull qwen2.5:7b";
+    p.tabIndex = -1;
+    pop.replaceChildren(h, p);
+    openLayerEl(pop, el.picker, { focusFirst: false });
+    p.focus();
+    return;
+  }
+  for (const m of models) {
+    const li = document.createElement("li");
+    const label = document.createElement("label");
+    label.className = "model-opt" + (m.usable ? "" : " off");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = m.name;
+    box.checked = S.models.includes(m.name);
+    box.disabled = !m.usable;
+    box.addEventListener("change", () => {
+      const next = new Set(S.models);
+      if (box.checked) next.add(m.name);
+      else next.delete(m.name);
+      if (!next.size) {
+        box.checked = true; // at least one model stays selected
+        return;
+      }
+      setModels([...next]);
+    });
+    const name = document.createElement("span");
+    name.className = "m-name";
+    name.textContent = m.name;
+    if (m.default) {
+      const tag = document.createElement("span");
+      tag.className = "m-tag";
+      tag.textContent = "default";
+      name.append(" ", tag);
+    }
+    const meta = document.createElement("span");
+    meta.className = "m-meta";
+    const bits = [fmtBytes(m.size), m.parameters, m.quantization].filter(Boolean);
+    meta.textContent = bits.join(" · ");
+    label.append(box, name, meta);
+    if (!m.usable || m.fits === false) {
+      const why = document.createElement("span");
+      why.className = "m-why";
+      why.textContent = !m.usable ? m.reason : "May not fit in GPU memory: it will run slowly.";
+      label.append(why);
+    }
+    li.append(label);
+    list.append(li);
+  }
+  const foot = document.createElement("p");
+  foot.className = "m-foot";
+  foot.textContent = "Several models solve one after another, each with the GPU to itself.";
+  pop.replaceChildren(h, list, foot);
+  openLayerEl(pop, el.picker);
+  keepInViewport(pop);
+}
+
+/** Shift an absolutely placed popover left so it stays on screen (phones). */
+function keepInViewport(pop) {
+  pop.style.left = "";
+  const r = pop.getBoundingClientRect();
+  const over = r.right - (document.documentElement.clientWidth - 8);
+  if (over > 0) pop.style.left = `${-Math.min(over, r.left - 8)}px`;
+}
+
+function pickerLabel() {
+  if (!S.models.length) return "No model";
+  if (S.models.length === 1) return S.models[0];
+  return `${S.models.length} models`;
+}
+
 // ------------------------------------------------------------------- runs
 
-/** Fetch the stored runs and rebuild both solver layers from them. */
+/** Fetch the stored runs and rebuild their layers (a live run keeps its own). */
 export async function loadRuns() {
-  let runs = {};
+  let list = [];
   try {
-    runs = (await api.getRuns(S.id)).runs || {};
+    list = (await api.getRuns(S.id)).runs || [];
   } catch (e) {
     setStatus(`Couldn't load solver runs: ${e.message}`);
   }
-  for (const mode of MODES) {
-    const run = runs[mode] || null;
-    if (running && running.mode === mode) continue; // the live run owns this layer
-    S.runs[mode] = run;
-    S.layers[mode] = new Map();
-    for (const f of run?.fill || []) {
-      S.layers[mode].set(key(f.r, f.c), { letter: f.letter, confidence: f.confidence });
+  const liveKey = running ? runKey(running.mode, running.model) : null;
+  S.runs = list.map((r) => ({ ...r, key: runKey(r.mode, r.model || "unknown") }));
+  for (const r of S.runs) {
+    if (r.key === liveKey) continue; // the live run owns this layer
+    const layer = new Map();
+    for (const f of r.fill || []) layer.set(key(f.r, f.c), { letter: f.letter, confidence: f.confidence });
+    S.layers[r.key] = layer;
+  }
+  if (!running) {
+    const keys = new Set(S.runs.map((r) => r.key));
+    for (const k of Object.keys(S.layers)) if (!keys.has(k)) delete S.layers[k];
+    if (!keys.has(S.shown)) {
+      const remembered = recall(SHOWN_KEY + S.id);
+      const newestOfMode = [...S.runs].reverse().find((r) => r.mode === S.mode);
+      S.shown = keys.has(remembered) ? remembered : (newestOfMode || S.runs[S.runs.length - 1])?.key || null;
     }
+    if (S.compare && !keys.has(S.compare)) S.compare = null;
   }
   renderBar();
   ctx.render();
   if (!statusOverride) refreshStatus();
 }
 
-/** Switch the shown mode. Never starts a run. */
+/** Show one run's letters in the grid. */
+export function showRun(k, { remember = true } = {}) {
+  S.shown = k;
+  if (S.compare === k) S.compare = null;
+  if (remember && k) store(SHOWN_KEY + S.id, k);
+  renderBar();
+  ctx.render();
+  refreshStatus();
+}
+
+/** The mode of the next Solve. Never starts a run. */
 export function setMode(mode, { remember = false } = {}) {
   if (!MODES.includes(mode)) return;
   closeLayer({ restoreFocus: false });
   S.mode = mode;
-  if (remember) {
-    try { localStorage.setItem(MODE_KEY, mode); } catch { /* ignore */ }
-  }
+  if (remember) store(MODE_KEY, mode);
   renderBar();
   ctx.render();
   refreshStatus();
@@ -188,48 +356,119 @@ export function getMode() {
 
 // ----------------------------------------------------------------- render
 
-function fmtSeconds(s) {
+export function fmtSeconds(s) {
   if (s == null) return "–";
   return s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
 }
 
-function renderCard(mode) {
-  const card = el.cards[mode];
-  const run = S.runs[mode];
-  card.classList.toggle("current", S.mode === mode);
+function pct(a, b) {
+  return b ? Math.round((100 * a) / b) : 0;
+}
+
+function cardFor(run, state) {
+  // state: "stored" | "live" | "queued"
+  const k = run.key;
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "run";
+  card.dataset.key = k;
+  card.setAttribute("aria-pressed", S.shown === k ? "true" : "false");
+  card.classList.toggle("current", S.shown === k);
+  card.classList.toggle("compared", S.compare === k && S.shown !== k);
   const title = document.createElement("b");
   const dot = document.createElement("span");
-  dot.className = `dot ${mode}`;
-  const sub = mode === "model" ? (run?.model || "local model") : "clue database";
-  title.append(dot, `${NAMES[mode]} · ${sub}`);
-  if (!run) {
-    const p = document.createElement("p");
-    p.className = "empty";
-    p.textContent = "Not run yet";
-    card.replaceChildren(title, p);
-    return;
-  }
+  dot.className = `dot ${run.mode}`;
+  dot.setAttribute("aria-hidden", "true");
+  const name = document.createElement("span");
+  name.className = "run-model";
+  name.textContent = run.model;
+  const mode = document.createElement("span");
+  mode.className = "run-mode";
+  mode.textContent = NAMES[run.mode] || run.mode;
+  title.append(dot, mode, name);
   const rows = [];
-  const rounds = run.rounds != null ? ` · ${run.rounds} round${run.rounds === 1 ? "" : "s"}` : "";
-  rows.push(["Time", fmtSeconds(run.seconds) + rounds]);
-  const acc = run.accuracy;
-  if (acc) {
-    const pct = acc.letters_total ? Math.round((100 * acc.letters_correct) / acc.letters_total) : 0;
-    rows.push(["Letters", `${acc.letters_correct} / ${acc.letters_total} · ${pct}%`]);
-    rows.push(["Words", `${acc.words_correct} / ${acc.words_total}`]);
-  } else {
-    rows.push(["Filled", `${run.slots_filled} / ${run.slots_total} slots`]);
+  if (state === "queued") rows.push(["", "Queued"]);
+  else if (state === "live" && !run.fill) rows.push(["", "Solving…"]);
+  if (run.fill) {
+    const rounds = run.rounds != null ? ` · ${run.rounds} round${run.rounds === 1 ? "" : "s"}` : "";
+    rows.push(["Time", fmtSeconds(run.seconds) + rounds]);
+    const acc = run.accuracy;
+    if (acc) {
+      rows.push(["Letters", `${acc.letters_correct} / ${acc.letters_total} · ${pct(acc.letters_correct, acc.letters_total)}%`]);
+      rows.push(["Words", `${acc.words_correct} / ${acc.words_total} · ${pct(acc.words_correct, acc.words_total)}%`]);
+    } else {
+      rows.push(["Filled", `${run.slots_filled} / ${run.slots_total} slots`]);
+    }
+    const notes = [];
+    if (run.status && run.status !== "done") notes.push(run.status === "cancelled" ? "Cancelled" : run.status);
+    if (run.cache && run.cache.hits > run.cache.requests) notes.push("mostly cached answers");
+    if (run.failed) notes.push(`${run.failed} failed request${run.failed === 1 ? "" : "s"}`);
+    if (notes.length) rows.push(["Note", notes.join(", ")]);
+    if (state === "live") rows.unshift(["", "Solving…"]);
   }
-  if (run.status && run.status !== "done") rows.push(["Ended", run.status]);
   const dl = document.createElement("dl");
-  for (const [k, v] of rows) {
+  for (const [kk, v] of rows) {
+    if (!kk) {
+      const p = document.createElement("p");
+      p.className = "empty";
+      p.textContent = v;
+      card.append(p);
+      continue;
+    }
     const dt = document.createElement("dt");
-    dt.textContent = k;
+    dt.textContent = kk;
     const dd = document.createElement("dd");
     dd.textContent = v;
     dl.append(dt, dd);
   }
-  card.replaceChildren(title, dl);
+  const shownText = S.shown === k ? "shown in the grid" : "press to show its letters";
+  card.setAttribute("aria-label", `${NAMES[run.mode]} run with ${run.model}, ${shownText}`);
+  card.prepend(title);
+  if (dl.childElementCount) card.append(dl);
+  card.addEventListener("click", () => {
+    if (state === "queued") return;
+    showRun(k);
+  });
+  return card;
+}
+
+function renderRuns() {
+  const cards = [];
+  const liveKey = running?.model ? runKey(running.mode, running.model) : null;
+  const queued = running ? running.models.slice(running.index + 1).map((m) => runKey(running.mode, m)) : [];
+  const seen = new Set();
+  for (const r of S.runs) {
+    seen.add(r.key);
+    cards.push(cardFor(r, r.key === liveKey ? "live" : queued.includes(r.key) ? "queued" : "stored"));
+  }
+  if (liveKey && !seen.has(liveKey)) {
+    cards.push(cardFor({ key: liveKey, mode: running.mode, model: running.model }, "live"));
+  }
+  for (const k of queued) {
+    if (!seen.has(k)) cards.push(cardFor({ key: k, mode: runMode(k), model: runModel(k) }, "queued"));
+  }
+  if (!cards.length) {
+    const p = document.createElement("p");
+    p.className = "empty runs-empty";
+    p.textContent = "No runs yet.";
+    cards.push(p);
+  }
+  // Keep focus on the card that had it.
+  const focusedKey = document.activeElement?.closest?.(".run")?.dataset.key;
+  el.runs.replaceChildren(...cards);
+  if (focusedKey) el.runs.querySelector(`.run[data-key="${CSS.escape(focusedKey)}"]`)?.focus({ preventScroll: true });
+}
+
+function renderCompare() {
+  const sel = el.compare;
+  const others = S.runs.filter((r) => r.key !== S.shown);
+  const opts = [new Option("Compare with…", "")];
+  for (const r of others) opts.push(new Option(runLabel(r.key), r.key));
+  sel.replaceChildren(...opts);
+  sel.value = S.compare && others.some((r) => r.key === S.compare) ? S.compare : "";
+  if (!sel.value) S.compare = null;
+  sel.disabled = !others.length || !S.shown;
+  sel.title = sel.disabled ? "Two runs are needed to compare them" : "Mark cells where the shown run disagrees with another";
 }
 
 function renderBar() {
@@ -241,40 +480,39 @@ function renderBar() {
     const locked = !!running;
     b.setAttribute("aria-disabled", !a.available || locked ? "true" : "false");
     b.title = !a.available ? a.hint || a.reason : locked ? "Wait for the run to finish or cancel it" : "";
-    renderCard(mode);
   }
+  el.picker.querySelector(".label").textContent = pickerLabel();
+  el.picker.setAttribute("aria-disabled", running ? "true" : "false");
+  el.picker.title = running ? "Wait for the run to finish or cancel it" : `Models for the next Solve: ${S.models.join(", ")}`;
+  renderRuns();
+  renderCompare();
+  const shownMode = runMode(S.shown) || S.mode;
   el.root.style.setProperty("--mode-colour", `var(--${running?.mode || S.mode})`);
-  document.documentElement.style.setProperty("--mode-colour", `var(--${S.mode})`);
+  document.documentElement.style.setProperty("--mode-colour", `var(--${shownMode})`);
 
   // Solve button
   let reason = "";
   if (!S.puzzle.solver_supported) reason = "This puzzle has multi-letter squares. The solver can't fill it yet.";
   else if (!availability[S.mode].available) reason = availability[S.mode].reason;
+  else if (!S.models.length) reason = "Choose a model first.";
   if (running) {
     el.solve.textContent = "Cancel";
     el.solve.setAttribute("aria-disabled", "false");
     el.solve.title = "";
   } else {
-    el.solve.textContent = S.runs[S.mode] ? "Solve again" : "Solve";
+    const have = S.models.length && S.models.every((m) => S.runs.some((r) => r.key === runKey(S.mode, m)));
+    el.solve.textContent = have ? "Solve again" : "Solve";
     el.solve.setAttribute("aria-disabled", reason ? "true" : "false");
     el.solve.title = reason;
   }
-
-  // Disagreements: only when both modes have a run.
-  const both = !!(S.runs.model && S.runs.lookup);
-  el.diff.disabled = !both;
-  el.diff.parentElement.title = both ? "" : "Run both modes to compare them";
-  if (!both) el.diff.checked = false;
-  S.showDiff = both && el.diff.checked;
 }
 
 // ---------------------------------------------------------------- running
 
-/** Solve becomes Cancel, the mode toggle is locked, the progress line shows. */
-export function setRunning(on, mode = S.mode) {
-  running = on ? { ...(running || {}), mode } : null;
+function setRunning(on) {
   el.progress.hidden = !on;
   if (on) setProgress(null);
+  else stopWaitTimer();
   renderBar();
 }
 
@@ -290,28 +528,25 @@ export function setProgress(fraction) {
   }
 }
 
-/**
- * Put solver letters into a mode's layer as a `fill` event arrives.
- * cells: [{r, c, letter, confidence}]. A letter that changes one the solver
- * placed earlier flashes; a new one fades in.
- */
-export function applyFillEvent(cells, mode = running?.mode || S.mode) {
-  const layer = S.layers[mode];
-  const shown = mode === S.mode;
+/** Solver letters into the live run's layer as a `fill` event arrives. */
+export function applyFillEvent(cells, k = running ? runKey(running.mode, running.model) : S.shown) {
+  if (!k) return;
+  const layer = S.layers[k] || (S.layers[k] = new Map());
+  const shown = k === S.shown;
   const anims = [];
   for (const f of cells || []) {
-    const k = key(f.r, f.c);
+    const kk = key(f.r, f.c);
     if (!S.open(f.r, f.c) || !f.letter) continue;
-    const prev = layer.get(k);
+    const prev = layer.get(kk);
     const conf = typeof f.confidence === "number" ? f.confidence : 1;
-    layer.set(k, { letter: String(f.letter).toUpperCase(), confidence: conf });
-    if (shown && !S.user.has(k)) {
-      if (!prev) anims.push([k, "fresh"]);
-      else if (prev.letter !== f.letter.toUpperCase()) anims.push([k, "flash"]);
+    layer.set(kk, { letter: String(f.letter).toUpperCase(), confidence: conf });
+    if (shown && !S.user.has(kk)) {
+      if (!prev) anims.push([kk, "fresh"]);
+      else if (prev.letter !== f.letter.toUpperCase()) anims.push([kk, "flash"]);
     }
   }
   ctx.render();
-  for (const [k, kind] of anims) animateCell(k, kind);
+  for (const [kk, kind] of anims) animateCell(kk, kind);
 }
 
 function stageText(ev) {
@@ -327,37 +562,102 @@ function stageText(ev) {
   return ev.name ? String(ev.name) : "Working";
 }
 
+function modelPrefix() {
+  if (!running?.model) return "";
+  if (running.count > 1) return `Model ${running.index + 1} of ${running.count}: ${running.model} · `;
+  return "";
+}
+
+function waitingText(w) {
+  const secs = Math.round(w.seconds + (performance.now() - w.at) / 1000);
+  const t = secs > 0 ? ` ${secs} s` : "";
+  if (w.reason === "loading") {
+    const others = (w.resident || []).filter((m) => m !== w.model);
+    const tail = others.length ? ` (${others.join(", ")} ${others.length === 1 ? "is" : "are"} in memory)` : "";
+    return `Loading ${w.model}${tail}…${t}`;
+  }
+  return `Waiting for the local model (loading or busy)…${t}`;
+}
+
+function showRunningStatus() {
+  if (!running) return;
+  const body = running.waiting ? waitingText(running.waiting) : running.stage || "Starting";
+  setStatus(modelPrefix() + body);
+}
+
+function stopWaitTimer() {
+  if (waitTimer) clearInterval(waitTimer);
+  waitTimer = null;
+}
+
 /** Handle one solver event (already JSON-parsed). */
 export function handleSolverEvent(ev) {
-  if (!ev || typeof ev !== "object") return;
+  if (!ev || typeof ev !== "object" || !running) return;
   switch (ev.type) {
+    case "model": {
+      running.model = ev.model;
+      running.index = ev.index ?? running.index;
+      running.count = ev.count ?? running.count;
+      running.waiting = null;
+      running.stage = "Starting";
+      const k = runKey(running.mode, ev.model);
+      S.layers[k] = new Map(); // re-running a pair replaces only its letters
+      showRun(k, { remember: false });
+      showRunningStatus();
+      break;
+    }
     case "stage":
-      setStatus(stageText(ev));
+      running.stage = stageText(ev);
+      if (running.waiting?.reason === "loading" && ev.done) running.waiting = null;
+      showRunningStatus();
       if (ev.done != null && ev.total) setProgress(ev.done / ev.total);
       else setProgress(null);
       break;
+    case "waiting":
+      if (ev.reason === "resumed") {
+        running.waiting = null;
+        stopWaitTimer();
+      } else {
+        running.waiting = { ...ev, at: performance.now() };
+        if (!waitTimer) waitTimer = setInterval(showRunningStatus, 1000);
+      }
+      showRunningStatus();
+      break;
+    case "warning": {
+      const who = running.count > 1 && ev.model ? `${ev.model}: ` : "";
+      running.warnings = { ...(running.warnings || {}), [ev.model || ""]: who + ev.message };
+      setWarning(Object.values(running.warnings).join(" "));
+      break;
+    }
     case "fill":
+      if (running.waiting) {
+        running.waiting = null;
+        stopWaitTimer();
+        showRunningStatus();
+      }
       applyFillEvent(ev.cells);
       break;
-    case "slot":
-      if (running) running.filledSlots = (running.filledSlots || 0) + 1;
+    case "done":
+      // One model's run is over; the job may go on with the next model.
+      running.waiting = null;
+      stopWaitTimer();
+      if (ev.cancelled) running.cancelledText = `Cancelled. ${ev.filled ?? 0} of ${ev.total ?? S.slots.length} clues filled.`;
+      loadRuns();
       break;
-    case "done": {
-      const mode = running?.mode;
+    case "error":
+      running.errorText = `The solver stopped${running.count > 1 ? ` (${ev.model})` : ""}: ${ev.message || "unknown error"}. Your letters are unchanged.`;
+      setStatus(running.errorText);
+      break;
+    case "end": {
+      const done = running;
       finish();
-      if (ev.cancelled) {
-        setStatus(`Cancelled. ${ev.filled ?? 0} of ${ev.total ?? S.slots.length} clues filled.`);
-      }
+      const text = done.cancelledText || done.errorText || null;
       loadRuns().then(() => {
-        if (!ev.cancelled && mode === S.mode) refreshStatus();
+        if (text) setStatus(text);
+        else refreshStatus();
       });
       break;
     }
-    case "error":
-      finish();
-      setStatus(`The solver stopped: ${ev.message || "unknown error"}. Your letters are unchanged.`);
-      loadRuns();
-      break;
     default:
       break;
   }
@@ -365,10 +665,11 @@ export function handleSolverEvent(ev) {
 
 function finish() {
   running?.source?.close();
+  running = null;
   setRunning(false);
 }
 
-/** Start a run of the selected mode with the user's letters as fixed. */
+/** Start a run of the selected mode and models, with the user's letters fixed. */
 export async function startSolve() {
   const mode = S.mode;
   if (running) return;
@@ -378,7 +679,7 @@ export async function startSolve() {
   }
   let res;
   try {
-    res = await api.solve(S.id, mode, S.user);
+    res = await api.solve(S.id, mode, S.user, S.models.length ? S.models : undefined);
   } catch (e) {
     setStatus(e.message);
     return;
@@ -388,18 +689,16 @@ export async function startSolve() {
     setStatus("The server didn't return a solve job.");
     return;
   }
-  attach(job, mode);
+  attach(job, mode, res.models || S.models);
 }
 
 /** Follow a job's event stream. The server replays every event from the start
  * (and resumes from Last-Event-ID when EventSource reconnects by itself). */
-function attach(job, mode) {
-  // Re-running a mode replaces only that mode's solver letters.
-  S.layers[mode] = new Map();
-  running = { mode, job, filledSlots: 0 };
-  setRunning(true, mode);
+function attach(job, mode, list) {
+  running = { mode, job, models: list, index: 0, count: list.length, model: null, stage: "Starting" };
+  setWarning("");
+  setRunning(true);
   setStatus(`Starting the ${NAMES[mode]} run`);
-  ctx.render();
   const source = new EventSource(api.solveEventsUrl(job));
   running.source = source;
   source.onmessage = (msg) => {
@@ -431,25 +730,39 @@ export function isRunning() {
   return !!running;
 }
 
-/** Drop one mode's solver letters, here and on the server. */
-export async function clearSolverLetters(mode) {
-  S.layers[mode] = new Map();
-  S.runs[mode] = null;
+/** Drop one run's letters, here and on the server. */
+export async function clearRun(k) {
+  if (!k) return;
+  delete S.layers[k];
+  S.runs = S.runs.filter((r) => r.key !== k);
+  if (S.compare === k) S.compare = null;
+  if (S.shown === k) S.shown = null;
   renderBar();
   ctx.render();
   refreshStatus();
   try {
-    await api.clearRun(S.id, mode);
+    await api.clearRun(S.id, runMode(k), runModel(k));
   } catch (e) {
     setStatus(`Couldn't clear the stored run: ${e.message}`);
   }
+  await loadRuns();
+}
+
+export async function clearAllRuns() {
+  for (const mode of MODES) {
+    try { await api.clearRun(S.id, mode); } catch { /* reported below by loadRuns */ }
+  }
+  S.layers = {};
+  S.runs = [];
+  S.shown = S.compare = null;
+  await loadRuns();
 }
 
 // ---------------------------------------------------------------- suggest
 
 let suggestTrigger = null;
 
-/** Ask for ranked candidates for the current clue in the selected mode. */
+/** Ask for ranked candidates for the current clue, with the first chosen model. */
 export async function suggest(trigger) {
   suggestTrigger = trigger;
   const slot = S.currentSlot();
@@ -464,13 +777,13 @@ export async function suggest(trigger) {
   setStatus(`Asking for suggestions for ${slot.number}${slot.direction === "across" ? "A" : "D"}`);
   let res;
   try {
-    res = await api.candidates(S.id, slot.id, mode, /[A-Z]/.test(pattern) ? pattern : null);
+    res = await api.candidates(S.id, slot.id, mode, /[A-Z]/.test(pattern) ? pattern : null, S.models[0]);
   } catch (e) {
     setStatus(e.message);
     return;
   }
   refreshStatus();
-  renderSuggestions(res?.candidates || [], slot);
+  renderSuggestions(res?.candidates || [], slot, res?.model);
 }
 
 /**
@@ -478,7 +791,7 @@ export async function suggest(trigger) {
  * {answer, score|confidence, source}. Conflicts with the user's letters are
  * dropped. Choosing one writes it as user letters.
  */
-export function renderSuggestions(candidates, slot = S.currentSlot()) {
+export function renderSuggestions(candidates, slot = S.currentSlot(), model = null) {
   const pop = el.popover;
   const label = `${slot.number}${slot.direction === "across" ? "A" : "D"}`;
   const fits = (answer) =>
@@ -494,7 +807,7 @@ export function renderSuggestions(candidates, slot = S.currentSlot()) {
   const top = Math.max(...list.map((x) => conf(x)), 1e-9);
   const h = document.createElement("h3");
   h.id = "suggest-title";
-  h.textContent = `Suggestions for ${label} (${NAMES[S.mode]})`;
+  h.textContent = `Suggestions for ${label} (${NAMES[S.mode]}${model ? `, ${model}` : ""})`;
   pop.setAttribute("aria-labelledby", h.id);
   const ol = document.createElement("ol");
   for (const cand of list) {

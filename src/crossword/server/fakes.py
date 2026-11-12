@@ -114,7 +114,7 @@ class FakeOllama:
         self,
         model: str,
         answers: dict[str, str],
-        vocab: dict[int, list[str]],
+        vocab: dict[int, list[str]] | Callable[[int, str | None], list[str]],
         *,
         cache: bool = True,
         registry: FakeRegistry | None = None,
@@ -145,7 +145,10 @@ class FakeOllama:
             self.registry.load(self.model)
 
     def _decoys(self, clue: str, length: int, pattern: str | None) -> list[str]:
-        pool = [w for w in self.vocab.get(length, []) if matches(w, length, pattern)]
+        if callable(self.vocab):
+            pool = list(self.vocab(length, pattern))
+        else:
+            pool = [w for w in self.vocab.get(length, []) if matches(w, length, pattern)]
         pool.sort(key=lambda w: _h(self.model, clue, w))
         return pool[:4]
 
@@ -225,16 +228,35 @@ def known_answers(store: Store) -> tuple[dict[str, str], dict[int, list[str]]]:
 
 
 def fake_sources(
-    store: Store, registry: FakeRegistry | None = None, *, scale: float = 1.0
+    store: Store,
+    registry: FakeRegistry | None = None,
+    *,
+    scale: float = 1.0,
+    dictionaries: bool = True,
 ) -> Callable[[EngineConfig], Sources]:
-    """A ``Jobs(sources=...)`` factory built from the stored solutions."""
-    from crossword.solver.candidates.wordlist import WordList
+    """A ``Jobs(sources=...)`` factory built from the stored solutions.
+
+    ``dictionaries``: the vocabulary also has the system word lists (as in a
+    real solve), so the search can't fill the grid from the answers alone and
+    the fake models' hit rates show in the scores."""
+    from crossword.solver.candidates.wordlist import DEFAULT_DICTS, WordList
+
+    built: dict[frozenset[str], WordList] = {}
 
     def build(config: EngineConfig) -> Sources:
         answers, vocab = known_answers(store)
         words = [(w, 5) for ws in vocab.values() for w in ws]
-        wl = WordList(paths=[], cluedb=None, words=words)
-        model = FakeOllama(config.model, answers, vocab, cache=config.cache,
+        key = frozenset(w for w, _ in words)
+        if key not in built:
+            built.clear()
+            paths = DEFAULT_DICTS if dictionaries else ()
+            built[key] = WordList(paths=paths, cluedb=None, words=words)
+            built[key].available()
+        wl = built[key]
+        def decoys(n: int, pattern: str | None) -> list[str]:
+            return [w for w, _ in wl.match(n, pattern, 60)]
+
+        model = FakeOllama(config.model, answers, decoys, cache=config.cache,
                            registry=registry, scale=scale)
         db = FakeClueDB(answers) if config.mode == "lookup" else None
         return Sources(first=model, requery=model, wordlist=wl, cluedb=db)

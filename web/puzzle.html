@@ -25,14 +25,18 @@
         <button type="button" id="m-model" aria-pressed="true"><span class="dot model" aria-hidden="true"></span>Model</button>
         <button type="button" id="m-lookup" aria-pressed="false"><span class="dot lookup" aria-hidden="true"></span>Lookup</button>
       </div>
+      <div class="picker-wrap">
+        <button type="button" class="btn picker" id="model-btn" aria-haspopup="dialog" aria-controls="model-pop" aria-expanded="false"><span class="visually-hidden">Models: </span><span class="label">Models</span> ▾</button>
+        <div class="popover model-pop" id="model-pop" role="dialog" hidden></div>
+      </div>
       <button type="button" class="btn primary" id="solve">Solve</button>
       <span class="status" id="status" role="status"></span>
     </div>
-    <div class="runs">
-      <div class="run" id="run-model"></div>
-      <div class="run" id="run-lookup"></div>
-    </div>
-    <label class="check diff-toggle"><input type="checkbox" id="diff" disabled> Show disagreements</label>
+    <p class="solver-warn" id="solver-warn" role="alert" hidden></p>
+    <div class="runs" id="runs" aria-label="Solver runs: choose one to show its letters"></div>
+    <label class="compare-wrap"><span class="visually-hidden">Compare the shown run with</span>
+      <select id="compare" class="select" disabled><option value="">Compare with…</option></select>
+    </label>
     <div class="solver-progress" hidden></div>
   </section>
 
