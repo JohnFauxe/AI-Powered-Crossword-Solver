@@ -313,10 +313,10 @@ def test_cli_convert(tmp_path, capsys):
     assert cli.main(["show", str(tmp_path / "nope.puz")]) == 1
 
 
-@pytest.mark.parametrize("cmd", [["solve", "x.json"], ["eval", "folder"]])
-def test_cli_stubs(cmd, capsys):
-    assert cli.main(cmd) == 2
-    assert "not implemented yet" in capsys.readouterr().err
+def test_cli_solve_and_eval_errors(tmp_path, capsys):
+    assert cli.main(["solve", str(tmp_path / "x.json")]) == 1
+    assert cli.main(["eval", str(tmp_path)]) == 1
+    assert "No puzzle files" in capsys.readouterr().err
 
 
 @needs_samples

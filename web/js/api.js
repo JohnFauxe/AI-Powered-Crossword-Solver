@@ -70,5 +70,10 @@ export const solve = (id, mode, letters) =>
   request("POST", `/puzzles/${enc(id)}/solve`, { mode, letters: lettersToList(letters) });
 export const cancelSolve = (job) => request("POST", `/solve/${enc(job)}/cancel`);
 export const solveEventsUrl = (job) => `/api/solve/${enc(job)}/events`;
-export const candidates = (id, slot, mode) =>
-  request("GET", `/puzzles/${enc(id)}/candidates?slot=${enc(slot)}&mode=${enc(mode)}`);
+/** pattern: the slot's known letters, "." for unknown, e.g. "C.T" (optional). */
+export const candidates = (id, slot, mode, pattern) =>
+  request(
+    "GET",
+    `/puzzles/${enc(id)}/candidates?slot=${enc(slot)}&mode=${enc(mode)}` +
+      (pattern ? `&pattern=${enc(pattern)}` : ""),
+  );

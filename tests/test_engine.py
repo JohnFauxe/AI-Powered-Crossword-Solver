@@ -331,3 +331,41 @@ def test_run_record_is_what_public_run_reads():
         "letters_correct": 0, "letters_total": len(puzzle.open_cells()),
         "words_correct": 0, "words_total": len(puzzle.slots),
     }
+
+
+# ------------------------------------------------------------------- evaluate
+
+
+def test_eval_recall_and_table():
+    from crossword.solver import evaluate
+
+    assert evaluate.recall([1, 3, None, 30]) == {"r@1": 0.25, "r@5": 0.5, "r@20": 0.5}
+    puzzle = load(MINI)
+    sources, _ = make_sources(puzzle)
+    engine = Engine(puzzle, fast(), sources)
+    run(collect(engine))
+    row = evaluate.score(engine, MINI, "default", 1.0)
+    assert row.letters == 1.0 and row.perfect and row.first["r@5"] == 1.0
+    assert row.held_out == "n/a (no clue lookup)"
+    other = dict(row.as_json(), mode="lookup", held_out="NOT held out by any filter")
+    text = evaluate.table([other, row, dict(row.as_json(), puzzle="b.json")])
+    lines = text.splitlines()
+    assert lines[1].startswith("model")  # model mode first, the headline
+    assert any("MEAN" in x and "2/2" in x for x in lines)
+    assert text.endswith("held out: NOT held out by any filter")
+
+
+def test_cli_engine_switches():
+    from crossword import cli
+
+    args = cli.build_parser().parse_args(
+        ["eval", "x", "--no-requery", "--no-verify", "--fewshot", "any", "--samples", "3",
+         "--model", "m", "--exclude-after", "2020-01-01", "--exclude-source", "nyt",
+         "--set", "letter_conf=0.7"]
+    )
+    ch = cli.engine_changes(args)
+    assert ch == {
+        "requery": False, "verify": False, "fewshot": "any", "samples": 3, "model": "m",
+        "exclude_after": "2020-01-01", "exclude_sources": ("nyt",), "letter_conf": 0.7,
+    }
+    assert EngineConfig.for_mode("model", **ch).leaky

@@ -128,6 +128,12 @@ export async function loadHealth() {
       const m = h.modes?.[mode];
       if (m) availability[mode] = { available: !!m.available, reason: m.reason || null, hint: m.hint || null };
     }
+    // A run still going on this puzzle (page reloaded mid-run): follow it again.
+    const live = h.running;
+    if (live && live.puzzle === S.id && !running && MODES.includes(live.mode)) {
+      if (live.mode !== S.mode) setMode(live.mode);
+      attach(live.job, live.mode);
+    }
   } catch {
     // Health unknown: leave both modes enabled; a solve attempt will say why it fails.
   }
@@ -382,6 +388,12 @@ export async function startSolve() {
     setStatus("The server didn't return a solve job.");
     return;
   }
+  attach(job, mode);
+}
+
+/** Follow a job's event stream. The server replays every event from the start
+ * (and resumes from Last-Event-ID when EventSource reconnects by itself). */
+function attach(job, mode) {
   // Re-running a mode replaces only that mode's solver letters.
   S.layers[mode] = new Map();
   running = { mode, job, filledSlots: 0 };
@@ -393,10 +405,13 @@ export async function startSolve() {
   source.onmessage = (msg) => {
     let ev;
     try { ev = JSON.parse(msg.data); } catch { return; }
+    if (running?.job !== job) return;
     handleSolverEvent(ev);
   };
   source.onerror = () => {
-    if (!running) return;
+    if (!running || running.job !== job) return;
+    // CONNECTING: the browser retries and the server resumes the stream.
+    if (source.readyState !== EventSource.CLOSED) return;
     finish();
     setStatus("The solver stopped: lost the connection to the server. Your letters are unchanged.");
     loadRuns();
@@ -444,13 +459,17 @@ export async function suggest(trigger) {
     setStatus(availability[mode].reason);
     return;
   }
+  // Known letters: the user's only (solver letters may be wrong).
+  const pattern = slot.cells.map(([r, c]) => S.user.get(key(r, c))?.[0] || ".").join("");
+  setStatus(`Asking for suggestions for ${slot.number}${slot.direction === "across" ? "A" : "D"}`);
   let res;
   try {
-    res = await api.candidates(S.id, slot.id, mode);
+    res = await api.candidates(S.id, slot.id, mode, /[A-Z]/.test(pattern) ? pattern : null);
   } catch (e) {
     setStatus(e.message);
     return;
   }
+  refreshStatus();
   renderSuggestions(res?.candidates || [], slot);
 }
 
