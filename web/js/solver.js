@@ -387,9 +387,10 @@ function cardFor(run, state) {
   mode.textContent = NAMES[run.mode] || run.mode;
   title.append(dot, mode, name);
   const rows = [];
+  // A pair being (re-)solved or waiting its turn shows its state, not the old figures.
   if (state === "queued") rows.push(["", "Queued"]);
-  else if (state === "live" && !run.fill) rows.push(["", "Solving…"]);
-  if (run.fill) {
+  else if (state === "live") rows.push(["", "Solving…"]);
+  else if (run.fill) {
     const rounds = run.rounds != null ? ` · ${run.rounds} round${run.rounds === 1 ? "" : "s"}` : "";
     rows.push(["Time", fmtSeconds(run.seconds) + rounds]);
     const acc = run.accuracy;
@@ -404,7 +405,6 @@ function cardFor(run, state) {
     if (run.cache && run.cache.hits > run.cache.requests) notes.push("mostly cached answers");
     if (run.failed) notes.push(`${run.failed} failed request${run.failed === 1 ? "" : "s"}`);
     if (notes.length) rows.push(["Note", notes.join(", ")]);
-    if (state === "live") rows.unshift(["", "Solving…"]);
   }
   const dl = document.createElement("dl");
   for (const [kk, v] of rows) {
