@@ -1,0 +1,508 @@
+<title>Crossword Solve Loop</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* Layout: one reading column on newsprint white; diagrams drawn like a puzzle grid (black squares, highlighted cells). */
+:root {
+  --paper: #fbfbf8;
+  --ink: #16181d;
+  --muted: #5b6070;
+  --rule: #d9dbe2;
+  --cell: #ffffff;
+  --block: #16181d;
+  --hl-word: #cfe3ff;   /* the selected-word blue of a puzzle app */
+  --hl-cell: #ffd84d;   /* the selected-cell yellow */
+  --accent: #1f5fd1;
+  --good: #1d7a46;
+  --warn: #b5531c;
+  --code-bg: #f0f1f4;
+  --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #121419; --ink: #e8e9ee; --muted: #9aa0b0; --rule: #2c303a;
+    --cell: #1b1e25; --block: #e8e9ee; --hl-word: #1d3459; --hl-cell: #8a6d00;
+    --accent: #7aa7ff; --good: #5cc98a; --warn: #f09a63; --code-bg: #1b1e25;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #121419; --ink: #e8e9ee; --muted: #9aa0b0; --rule: #2c303a;
+  --cell: #1b1e25; --block: #e8e9ee; --hl-word: #1d3459; --hl-cell: #8a6d00;
+  --accent: #7aa7ff; --good: #5cc98a; --warn: #f09a63; --code-bg: #1b1e25;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--paper); color: var(--ink);
+  font-family: var(--f-body); font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+main { max-width: 760px; margin: 0 auto; padding-block: 48px 72px; display: grid; gap: 56px; }
+section { display: grid; gap: 16px; min-width: 0; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: clamp(2rem, 6vw, 3rem); font-weight: 800; letter-spacing: -0.02em; }
+h2 { font-size: 1.5rem; font-weight: 700; }
+h3 { font-size: 1.05rem; font-weight: 700; }
+p { margin: 0; max-width: 65ch; }
+.lede { font-size: 1.15rem; color: var(--muted); }
+.lede strong { color: var(--ink); }
+.eyebrow {
+  font-family: var(--f-mono); font-size: 0.75rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+code, .mono { font-family: var(--f-mono); font-size: 0.88em; }
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+a { color: var(--accent); }
+
+/* hero: the title spelled into a row of grid cells */
+.hero { display: grid; gap: 20px; }
+.tiles { display: flex; flex-wrap: wrap; gap: 3px; }
+.tiles span {
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border: 1.5px solid var(--ink); background: var(--cell);
+  font-family: var(--f-mono); font-weight: 700; font-size: 1rem; position: relative;
+}
+.tiles span.b { background: var(--block); }
+.tiles span.w { background: var(--hl-word); }
+.tiles span.c { background: var(--hl-cell); }
+.tiles span sup { position: absolute; top: 1px; left: 3px; font-size: 8px; font-weight: 500; }
+
+.figure { overflow-x: auto; border-top: 2px solid var(--ink); border-bottom: 1px solid var(--rule); padding-block: 20px; }
+.figure svg { display: block; width: 100%; height: auto; min-width: 520px; }
+.figcap { font-size: 0.85rem; color: var(--muted); }
+
+svg text { font-family: var(--f-body); fill: var(--ink); }
+svg .mono { font-family: var(--f-mono); }
+svg .muted { fill: var(--muted); }
+svg .box { fill: var(--cell); stroke: var(--ink); stroke-width: 1.5; }
+svg .box-model { fill: var(--hl-word); stroke: var(--ink); stroke-width: 1.5; }
+svg .row-model { fill: var(--hl-word); }
+svg .row-plain { fill: var(--code-bg); }
+svg .line { stroke: var(--ink); stroke-width: 1.5; fill: none; }
+svg .line-soft { stroke: var(--muted); stroke-width: 1; fill: none; }
+svg .arrowhead { fill: var(--ink); }
+svg .tag { fill: var(--ink); }
+svg .tag-text { fill: var(--paper); font-family: var(--f-mono); font-size: 10px; letter-spacing: 0.06em; }
+svg .cellsq { fill: var(--cell); stroke: var(--ink); stroke-width: 1.5; }
+svg .cellsq-block { fill: var(--block); }
+svg .cellsq-word { fill: var(--hl-word); stroke: var(--ink); stroke-width: 1.5; }
+svg .trusted { stroke: var(--good); stroke-width: 3; fill: none; }
+svg .untrusted { stroke: var(--warn); stroke-width: 2; stroke-dasharray: 5 4; fill: none; }
+svg .good { fill: var(--good); }
+svg .warn { fill: var(--warn); }
+svg .factor { fill: var(--ink); }
+svg .node { fill: var(--cell); stroke: var(--ink); stroke-width: 1.5; }
+svg .bar-letters { fill: var(--accent); }
+svg .bar-words { fill: var(--hl-word); stroke: var(--accent); stroke-width: 1; }
+svg .grid { stroke: var(--rule); stroke-width: 1; }
+
+/* the three model calls */
+.calls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.call { display: grid; gap: 10px; align-content: start; padding: 16px; border: 1.5px solid var(--ink); background: var(--cell); min-width: 0; }
+.call .num { font-family: var(--f-mono); font-size: 0.75rem; color: var(--muted); }
+.call pre {
+  margin: 0; padding: 10px; background: var(--code-bg); font-family: var(--f-mono);
+  font-size: 0.72rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.call p { font-size: 0.92rem; }
+.stat { font-family: var(--f-mono); font-size: 0.85rem; }
+.stat b { color: var(--accent); }
+
+/* mixture bar */
+.mix { display: flex; height: 36px; border: 1.5px solid var(--ink); font-family: var(--f-mono); font-size: 0.75rem; }
+.mix div { display: grid; place-items: center; padding-inline: 6px; text-align: center; min-width: 0; overflow: hidden; }
+.mix .own { flex: 32; background: var(--hl-word); }
+.mix .dict { flex: 34; background: var(--cell); border-left: 1.5px solid var(--ink); }
+.mix .unl { flex: 34; background: var(--code-bg); border-left: 1.5px solid var(--ink); }
+
+.steps { display: grid; gap: 10px; padding: 0; margin: 0; list-style: none; counter-reset: s; }
+.steps li { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: baseline; }
+.steps li::before {
+  counter-increment: s; content: counter(s);
+  font-family: var(--f-mono); font-weight: 700; font-size: 0.8rem;
+  width: 24px; height: 24px; display: grid; place-items: center; border: 1.5px solid var(--ink);
+}
+
+/* tables */
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--f-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; border-bottom: 2px solid var(--ink); }
+td.n { text-align: right; font-family: var(--f-mono); }
+th.n { text-align: right; }
+
+/* review */
+.review { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; }
+.review > div { display: grid; gap: 12px; align-content: start; min-width: 0; }
+.review ul { margin: 0; padding-left: 1.1em; display: grid; gap: 10px; }
+.review li { max-width: 60ch; }
+.pill { display: inline-block; font-family: var(--f-mono); font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 8px; border: 1.5px solid currentColor; }
+.pill.good { color: var(--good); }
+.pill.warn { color: var(--warn); }
+
+footer { font-size: 0.85rem; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 16px; display: grid; gap: 6px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .tiles span.c { transition: background 0.2s; }
+}
+</style>
+
+<main>
+  <header class="hero">
+    <div class="tiles" aria-hidden="true">
+      <span><sup>1</sup>S</span><span>O</span><span>L</span><span>V</span><span>E</span><span class="b"></span><span class="w"><sup>2</sup>L</span><span class="c">O</span><span class="w">O</span><span class="w">P</span>
+    </div>
+    <div class="eyebrow">src/crossword/solver · model mode</div>
+    <h1>Crossword Solve Loop</h1>
+    <p class="lede"><strong>The model never fills the grid.</strong> It suggests ranked answers for each clue. A separate search, with no AI in it, picks the set of answers whose crossings agree. The two take turns, and each round the letters from crossing words make the model's next question easier.</p>
+  </header>
+
+  <!-- 1. pipeline -->
+  <section>
+    <div class="eyebrow">The loop</div>
+    <h2>From clues to a filled grid</h2>
+    <p>Blue boxes call the local model through Ollama. White boxes are plain numpy. The refine round runs up to 6 times, within a 600&nbsp;s budget for the whole solve.</p>
+    <div class="figure">
+      <svg viewBox="0 0 660 600" role="img" aria-label="Pipeline: first pass, grid search, refine rounds looping back to search, final fill">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="arrowhead"/>
+          </marker>
+        </defs>
+
+        <!-- input -->
+        <text x="300" y="20" text-anchor="middle" class="mono muted" font-size="12">puzzle (.puz / .ipuz / .json) + letters you typed</text>
+        <line x1="300" y1="28" x2="300" y2="48" class="line" marker-end="url(#ah)"/>
+
+        <!-- box 1 -->
+        <rect x="20" y="52" width="560" height="78" class="box-model"/>
+        <rect x="36" y="64" width="54" height="18" class="tag"/><text x="63" y="77" text-anchor="middle" class="tag-text">MODEL</text>
+        <text x="102" y="78" font-size="16" font-weight="700">1 · First pass</text>
+        <text x="36" y="104" font-size="14">Every clue → “give 10 ranked answers”</text>
+        <text x="36" y="122" font-size="12" class="muted">crossword-rules prompt + per-clue notes, JSON-schema output · right answer in list ≈ 28%</text>
+        <line x1="300" y1="130" x2="300" y2="158" class="line" marker-end="url(#ah)"/>
+        <text x="312" y="149" font-size="11" class="mono muted">a ranked list per slot</text>
+
+        <!-- box 2 -->
+        <rect x="20" y="162" width="560" height="78" class="box"/>
+        <rect x="36" y="174" width="84" height="18" class="tag"/><text x="78" y="187" text-anchor="middle" class="tag-text">NUMPY, NO AI</text>
+        <text x="132" y="188" font-size="16" font-weight="700">2 · Grid search</text>
+        <text x="36" y="214" font-size="14">Pick one word per slot so the crossings agree</text>
+        <text x="36" y="232" font-size="12" class="muted">belief propagation, then hill-climbing · dictionary fallback for answers no list has</text>
+        <line x1="300" y1="240" x2="300" y2="268" class="line" marker-end="url(#ah)"/>
+        <text x="312" y="259" font-size="11" class="mono muted">grid + confidence per cell and slot</text>
+
+        <!-- box 3 -->
+        <rect x="20" y="272" width="560" height="232" class="box"/>
+        <text x="36" y="298" font-size="16" font-weight="700">3 · Refine round</text>
+        <text x="564" y="298" text-anchor="end" font-size="12" class="mono muted">up to 6 rounds</text>
+
+        <rect x="36" y="312" width="528" height="30" class="row-plain"/>
+        <text x="48" y="332" font-size="13" class="mono" font-weight="700">a</text>
+        <text x="70" y="332" font-size="13">Build a pattern for each weak slot from trusted crossers</text>
+        <text x="552" y="332" text-anchor="end" font-size="13" class="mono" font-weight="700">S.A..E</text>
+
+        <rect x="36" y="348" width="528" height="30" class="row-model"/>
+        <text x="48" y="368" font-size="13" class="mono" font-weight="700">b</text>
+        <text x="70" y="368" font-size="13">Multiple choice: “which of these words that fit?”</text>
+        <text x="552" y="368" text-anchor="end" font-size="12" class="mono">≤150 choices</text>
+
+        <rect x="36" y="384" width="528" height="30" class="row-plain"/>
+        <text x="48" y="404" font-size="13" class="mono" font-weight="700">c</text>
+        <text x="70" y="404" font-size="13">Search again</text>
+
+        <rect x="36" y="420" width="528" height="30" class="row-model"/>
+        <text x="48" y="440" font-size="13" class="mono" font-weight="700">d</text>
+        <text x="70" y="440" font-size="13">Verify: “Is ANSWER right for this clue? Yes or No”</text>
+        <text x="552" y="440" text-anchor="end" font-size="12" class="mono">P(yes)</text>
+
+        <rect x="36" y="456" width="528" height="30" class="row-plain"/>
+        <text x="48" y="476" font-size="13" class="mono" font-weight="700">e</text>
+        <text x="70" y="476" font-size="13">Search again</text>
+
+        <!-- loop back -->
+        <path d="M580,471 H630 V201 H586" class="line" marker-end="url(#ah)"/>
+        <text x="640" y="340" font-size="11" class="mono muted" transform="rotate(90 640 340)" text-anchor="middle">next round</text>
+
+        <line x1="300" y1="504" x2="300" y2="532" class="line" marker-end="url(#ah)"/>
+        <!-- final -->
+        <rect x="20" y="536" width="560" height="50" class="box"/>
+        <text x="36" y="566" font-size="15" font-weight="700">Final fill</text>
+        <text x="120" y="566" font-size="13" class="muted">letters stream into the browser as each search finishes</text>
+      </svg>
+    </div>
+    <p class="figcap">The refine rounds do most of the work. Letters correct after the first search vs. at the end: uc 112 → 138, wsj 50 → 89, ucs 127 → 187, wp 129 → 208.</p>
+  </section>
+
+  <!-- 2. model calls -->
+  <section>
+    <div class="eyebrow">src/crossword/solver/prompts.py</div>
+    <h2>Three ways the model is asked</h2>
+    <div class="calls">
+      <article class="call">
+        <div class="num">first pass</div>
+        <h3>Free answers</h3>
+        <pre>Clue: Friend, in Paris
+Answer length: 3 letters
+Notes:
+- points to a foreign language…
+List 10 different candidate
+answers, best first.</pre>
+        <p>The system prompt sets out crossword rules. Notes are added for each clue: <code>?</code> puns, “Abbr.”, blanks, quotes, foreign words.</p>
+        <div class="stat">recall@20 ≈ <b>0.29</b></div>
+      </article>
+      <article class="call">
+        <div class="num">refine · step b</div>
+        <h3>Multiple choice</h3>
+        <pre>Known letters: S.A..E
+Words that fit the known letters:
+SHAPE, SNAKE, SPACE, STAGE, …
+Pick the 10 most likely answers
+from the list.</pre>
+        <p>Answers have to come from the list. 10 example clues from the clue DB are included, all with a <em>different</em> answer length, so they can't give the answer away.</p>
+        <div class="stat">recall@20 ≈ <b>0.77</b> <span class="muted">(40% of letters known)</span></div>
+      </article>
+      <article class="call">
+        <div class="num">refine · step d</div>
+        <h3>Verify</h3>
+        <pre>Clue: Friend, in Paris
+Proposed answer: AMI (3 letters)
+Is this a correct crossword
+answer for the clue?
+Reply Yes or No.</pre>
+        <p>The score is the probability of “Yes” in the first token's log-probabilities. One check takes about 0.03&nbsp;s.</p>
+        <div class="stat">true answer ranked above a wrong one ≈ <b>0.86–0.91</b></div>
+      </article>
+    </div>
+    <p>A 7B model is much better at picking the answer out of a short list than at producing a word of the right length itself. That is why letters from crossings feed into a multiple-choice question rather than just being added to the prompt. Putting the pattern in the prompt only got recall@20 to about 0.33.</p>
+  </section>
+
+  <!-- 3. search -->
+  <section>
+    <div class="eyebrow">src/crossword/solver/search.py</div>
+    <h2>How the grid search decides</h2>
+    <p>Each cell holds one letter. Each slot is a factor that scores whatever string its cells spell. The search passes messages between cells and slots until their letter odds settle, then cleans up the best guess with local moves.</p>
+    <div class="figure">
+      <svg viewBox="0 0 640 300" role="img" aria-label="Factor graph: across and down slot factors connected to a 3 by 3 grid of cells, feeding belief propagation and hill-climbing">
+        <defs>
+          <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" class="arrowhead"/>
+          </marker>
+        </defs>
+        <!-- links: across -->
+        <g class="line-soft">
+          <line x1="44" y1="100" x2="100" y2="100"/><line x1="44" y1="100" x2="160" y2="100"/><line x1="44" y1="100" x2="220" y2="100"/>
+          <line x1="44" y1="160" x2="100" y2="160"/><line x1="44" y1="160" x2="160" y2="160"/><line x1="44" y1="160" x2="220" y2="160"/>
+          <line x1="44" y1="220" x2="100" y2="220"/><line x1="44" y1="220" x2="160" y2="220"/><line x1="44" y1="220" x2="220" y2="220"/>
+          <line x1="100" y1="44" x2="100" y2="220"/><line x1="160" y1="44" x2="160" y2="220"/><line x1="220" y1="44" x2="220" y2="220"/>
+        </g>
+        <!-- across factors -->
+        <rect x="30" y="86" width="28" height="28" class="factor"/><rect x="30" y="146" width="28" height="28" class="factor"/><rect x="30" y="206" width="28" height="28" class="factor"/>
+        <!-- down factors -->
+        <rect x="86" y="30" width="28" height="28" class="factor"/><rect x="146" y="30" width="28" height="28" class="factor"/><rect x="206" y="30" width="28" height="28" class="factor"/>
+        <!-- cells -->
+        <g>
+          <circle cx="100" cy="100" r="17" class="node"/><circle cx="160" cy="100" r="17" class="node"/><circle cx="220" cy="100" r="17" class="node"/>
+          <circle cx="100" cy="160" r="17" class="node"/><circle cx="160" cy="160" r="17" class="node"/><circle cx="220" cy="160" r="17" class="node"/>
+          <circle cx="100" cy="220" r="17" class="node"/><circle cx="160" cy="220" r="17" class="node"/><circle cx="220" cy="220" r="17" class="node"/>
+        </g>
+        <g class="mono" font-size="14" font-weight="700" text-anchor="middle">
+          <text x="100" y="105">C</text><text x="160" y="105">A</text><text x="220" y="105">T</text>
+          <text x="100" y="165">A</text><text x="160" y="165">R</text><text x="220" y="165">E</text>
+          <text x="100" y="225">B</text><text x="160" y="225">E</text><text x="220" y="225">D</text>
+        </g>
+        <text x="44" y="262" font-size="12" class="muted">■ slot (word score)</text>
+        <text x="160" y="262" font-size="12" class="muted">○ cell (letter odds)</text>
+
+        <!-- process -->
+        <line x1="262" y1="160" x2="300" y2="160" class="line" marker-end="url(#ah2)"/>
+        <rect x="304" y="60" width="150" height="200" class="box"/>
+        <text x="318" y="86" font-size="13" font-weight="700">Belief propagation</text>
+        <text x="318" y="108" font-size="12" class="muted">phase 1: own lists only,</text>
+        <text x="318" y="124" font-size="12" class="muted">scores flattened ×8 → ×1</text>
+        <text x="318" y="148" font-size="12" class="muted">phase 2: add dictionary</text>
+        <text x="318" y="164" font-size="12" class="muted">words</text>
+        <text x="318" y="190" font-size="12" class="muted">words below e⁻²⁵ are</text>
+        <text x="318" y="206" font-size="12" class="muted">pruned as it sharpens</text>
+        <text x="318" y="244" font-size="11" class="mono">→ letter odds per cell</text>
+
+        <line x1="454" y1="160" x2="482" y2="160" class="line" marker-end="url(#ah2)"/>
+        <rect x="486" y="60" width="140" height="200" class="box"/>
+        <text x="500" y="86" font-size="13" font-weight="700">Hill-climbing</text>
+        <text x="500" y="108" font-size="12" class="muted">start from the most</text>
+        <text x="500" y="124" font-size="12" class="muted">likely letter per cell</text>
+        <text x="500" y="152" font-size="12">· swap a word</text>
+        <text x="500" y="170" font-size="12">· flip a letter</text>
+        <text x="500" y="188" font-size="12">· place a word, then</text>
+        <text x="500" y="204" font-size="12">  repair its crossers</text>
+        <text x="500" y="244" font-size="11" class="mono">→ best fill</text>
+      </svg>
+    </div>
+    <h3>What a slot thinks its answer could be</h3>
+    <p>On the first pass, a slot gives only 32% of its probability to the model's list. The rest goes to two fallbacks. Because of this, any letter string is allowed, so one clue the model can't answer doesn't force wrong letters into the words crossing it.</p>
+    <div class="mix" role="img" aria-label="Probability split: 32% model list, 34% dictionary, 34% unlisted strings">
+      <div class="own">model list 32%</div>
+      <div class="dict">dictionary 34%</div>
+      <div class="unl">any string 34%</div>
+    </div>
+    <p class="figcap">The miss rate is 0.68 on the first pass, split half and half. “Any string” is scored by a letter-pair model trained on every listed word. A slot's miss rate drops to 0.10 once its answer is verified, and to 0.15 for clue-DB answers in lookup mode.</p>
+  </section>
+
+  <!-- 4. trusted crossers -->
+  <section>
+    <div class="eyebrow">the biggest single gain</div>
+    <h2>Only trusted crossers supply letters</h2>
+    <p>The search is overconfident: cells it rated 90% or higher were only about 66% right. If a slot is re-asked using letters its own wrong guess put there, the model just gives the same wrong guess again, and early versions of the loop got <em>worse</em> each round. Now a crossing letter is used only if the crossing word came from a list where the model read that clue, with confidence ≥ 0.5.</p>
+    <div class="figure">
+      <svg viewBox="0 0 640 230" role="img" aria-label="A weak across slot with five down crossers; three trusted crossers give S, A and E; two untrusted give dots; the pattern is S.A.E">
+        <!-- columns of crossers: 5 columns x 3 rows, middle row is the weak slot -->
+        <g>
+          <!-- col 1 trusted -->
+          <rect x="40" y="20" width="44" height="44" class="cellsq"/><rect x="40" y="64" width="44" height="44" class="cellsq-word"/><rect x="40" y="108" width="44" height="44" class="cellsq"/>
+          <rect x="40" y="20" width="44" height="132" class="trusted"/>
+          <!-- col 2 untrusted -->
+          <rect x="84" y="20" width="44" height="44" class="cellsq"/><rect x="84" y="64" width="44" height="44" class="cellsq-word"/><rect x="84" y="108" width="44" height="44" class="cellsq"/>
+          <rect x="86" y="22" width="40" height="128" class="untrusted"/>
+          <!-- col 3 trusted -->
+          <rect x="128" y="20" width="44" height="44" class="cellsq"/><rect x="128" y="64" width="44" height="44" class="cellsq-word"/><rect x="128" y="108" width="44" height="44" class="cellsq"/>
+          <rect x="128" y="20" width="44" height="132" class="trusted"/>
+          <!-- col 4 untrusted -->
+          <rect x="172" y="20" width="44" height="44" class="cellsq"/><rect x="172" y="64" width="44" height="44" class="cellsq-word"/><rect x="172" y="108" width="44" height="44" class="cellsq"/>
+          <rect x="174" y="22" width="40" height="128" class="untrusted"/>
+          <!-- col 5 trusted -->
+          <rect x="216" y="20" width="44" height="44" class="cellsq"/><rect x="216" y="64" width="44" height="44" class="cellsq-word"/><rect x="216" y="108" width="44" height="44" class="cellsq"/>
+          <rect x="216" y="20" width="44" height="132" class="trusted"/>
+        </g>
+        <g class="mono" font-size="20" font-weight="700" text-anchor="middle">
+          <text x="62" y="93">S</text><text x="106" y="93" class="warn">o</text><text x="150" y="93">A</text><text x="194" y="93" class="warn">r</text><text x="238" y="93">E</text>
+        </g>
+        <g font-size="11" text-anchor="middle" class="mono">
+          <text x="62" y="172" class="good">model, 0.8</text>
+          <text x="106" y="186" class="warn">search</text>
+          <text x="150" y="172" class="good">verified</text>
+          <text x="194" y="186" class="warn">0.3</text>
+          <text x="238" y="172" class="good">model, 0.6</text>
+        </g>
+        <text x="40" y="214" font-size="12" class="muted">green: trusted crosser · orange dashed: letter only the search put there</text>
+
+        <line x1="290" y1="86" x2="340" y2="86" class="line" marker-end="url(#ah)"/>
+        <text x="360" y="62" font-size="12" class="muted">pattern sent to multiple choice</text>
+        <g>
+          <rect x="360" y="72" width="34" height="34" class="cellsq"/><rect x="394" y="72" width="34" height="34" class="cellsq"/><rect x="428" y="72" width="34" height="34" class="cellsq"/><rect x="462" y="72" width="34" height="34" class="cellsq"/><rect x="496" y="72" width="34" height="34" class="cellsq"/>
+        </g>
+        <g class="mono" font-size="17" font-weight="700" text-anchor="middle">
+          <text x="377" y="95">S</text><text x="411" y="95" class="muted">.</text><text x="445" y="95">A</text><text x="479" y="95" class="muted">.</text><text x="513" y="95">E</text>
+        </g>
+        <text x="360" y="134" font-size="12">→ SHAKE, SNARE, SPACE, STAGE, …</text>
+        <text x="360" y="152" font-size="12" class="muted">sorted by agreement with the current fill</text>
+        <text x="360" y="168" font-size="12" class="muted">and the model's earlier guesses</text>
+      </svg>
+    </div>
+    <p class="figcap">Letters you typed yourself are always part of the pattern and are never overwritten.</p>
+  </section>
+
+  <!-- 5. results -->
+  <section>
+    <div class="eyebrow">measured 2026-11-12 · RTX 3060 12 GB</div>
+    <h2>How well it does</h2>
+    <p>The mean of two 15×15 puzzles (Universal and WSJ, November 2026). They were published after the clue DB was collected, so no clue can be in it.</p>
+    <div class="figure">
+      <svg viewBox="0 0 640 270" role="img" aria-label="Bar chart of letters and words correct by setting">
+        <!-- scale: x0=210, 100% = 400px -->
+        <g class="grid">
+          <line x1="210" y1="20" x2="210" y2="230"/><line x1="310" y1="20" x2="310" y2="230"/><line x1="410" y1="20" x2="410" y2="230"/><line x1="510" y1="20" x2="510" y2="230"/><line x1="610" y1="20" x2="610" y2="230"/>
+        </g>
+        <g font-size="11" class="mono muted" text-anchor="middle">
+          <text x="210" y="248">0%</text><text x="310" y="248">25%</text><text x="410" y="248">50%</text><text x="510" y="248">75%</text><text x="610" y="248">100%</text>
+        </g>
+        <!-- rows: y 30, 80, 130, 180 -->
+        <g font-size="12" text-anchor="end">
+          <text x="200" y="44">first pass + search only</text>
+          <text x="200" y="94">default · qwen2.5:7b</text>
+          <text x="200" y="144" font-weight="700">default · gemma3:12b</text>
+          <text x="200" y="194">lookup mode (clue DB)</text>
+        </g>
+        <!-- letters (top bar), words (bottom bar) -->
+        <rect x="210" y="30" width="175.2" height="16" class="bar-letters"/><rect x="210" y="48" width="92.4" height="12" class="bar-words"/>
+        <rect x="210" y="80" width="245.2" height="16" class="bar-letters"/><rect x="210" y="98" width="179.6" height="12" class="bar-words"/>
+        <rect x="210" y="130" width="332.4" height="16" class="bar-letters"/><rect x="210" y="148" width="264" height="12" class="bar-words"/>
+        <rect x="210" y="180" width="399" height="16" class="bar-letters"/><rect x="210" y="198" width="394.8" height="12" class="bar-words"/>
+        <g font-size="11" class="mono">
+          <text x="391" y="43">43.8</text><text x="308" y="58" class="muted">23.1</text>
+          <text x="461" y="93">61.3</text><text x="396" y="108" class="muted">44.9</text>
+          <text x="548" y="143" font-weight="700">83.1</text><text x="480" y="158" class="muted">66.0</text>
+          <text x="566" y="193" text-anchor="end" style="fill: var(--paper)">99.8</text><text x="566" y="208" text-anchor="end" class="muted">98.7</text>
+        </g>
+        <rect x="210" y="258" width="14" height="10" class="bar-letters"/><text x="230" y="267" font-size="11">letters correct</text>
+        <rect x="340" y="258" width="14" height="10" class="bar-words"/><text x="360" y="267" font-size="11">words correct</text>
+      </svg>
+    </div>
+    <p class="figcap">Lookup mode answers clues from the 6.8M-row clue DB, so it is a ceiling, not a fair comparison with model mode. Run-to-run noise is about ±5 points.</p>
+
+    <h3>What each technique adds (qwen2.5:7b, uc + wsj)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Setting</th><th class="n">Letters</th><th class="n">Words</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Everything on (default)</strong></td><td class="n"><strong>61.3%</strong></td><td class="n"><strong>44.9%</strong></td></tr>
+          <tr><td>No few-shot examples in the re-query</td><td class="n">57.8%</td><td class="n">39.8%</td></tr>
+          <tr><td>Draft rule: letters from any confident cell</td><td class="n">54.5%</td><td class="n">37.1%</td></tr>
+          <tr><td>No pattern re-query</td><td class="n">53.4%</td><td class="n">30.1%</td></tr>
+          <tr><td>Choices ordered by word frequency only</td><td class="n">52.9%</td><td class="n">35.9%</td></tr>
+          <tr><td>No verification</td><td class="n">47.6%</td><td class="n">30.8%</td></tr>
+          <tr><td>First pass + search only</td><td class="n">43.8%</td><td class="n">23.1%</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Model screen (uc, 78 clues)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Model</th><th class="n">First pass r@20</th><th class="n">Multiple choice r@20</th><th class="n">Verify P(wrong)</th><th class="n">s / clue</th></tr></thead>
+        <tbody>
+          <tr><td>qwen2.5:7b <span class="muted">(default)</span></td><td class="n">.295</td><td class="n">.769</td><td class="n">.076</td><td class="n">0.85</td></tr>
+          <tr><td>qwen3:14b</td><td class="n">.436</td><td class="n">.808</td><td class="n">.087</td><td class="n">1.58</td></tr>
+          <tr><td><strong>gemma3:12b</strong></td><td class="n"><strong>.487</strong></td><td class="n"><strong>.833</strong></td><td class="n">.243</td><td class="n">1.38</td></tr>
+          <tr><td>phi4:14b</td><td class="n">.397</td><td class="n">.808</td><td class="n">.180</td><td class="n">1.74</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 6. review -->
+  <section>
+    <div class="eyebrow">review</div>
+    <h2>Strengths and open problems</h2>
+    <div class="review">
+      <div>
+        <span class="pill good">Works well</span>
+        <ul>
+          <li><strong>The work is split cleanly.</strong> The model suggests and the search settles conflicts, so each part can be measured on its own. The README has an ablation for each technique.</li>
+          <li><strong>The tests are held out properly.</strong> The puzzles are from Nov 2026 and the clue DB from 2022. Model-mode examples never share the slot's answer length, and the one setting that could leak is labelled LEAKY.</li>
+          <li><strong>Answers are cached</strong> by model, prompt version and options, so re-runs and benchmarks are cheap.</li>
+          <li><strong>Hand-entered letters are fixed.</strong> They feed the patterns and the solver never overwrites them.</li>
+        </ul>
+      </div>
+      <div>
+        <span class="pill warn">Open problems</span>
+        <ul>
+          <li><strong>The default model is probably the wrong one.</strong> gemma3:12b is about 21 points ahead on both letters and words and only about 1.3× slower. Run it on the two 21×21 puzzles (ucs, wp) to decide whether to switch.</li>
+          <li><strong>The first pass is the bottleneck.</strong> Only about 29% of clues get the right answer in their first list. A better first pass helps the most. qwen3's thinking mode hasn't been measured yet.</li>
+          <li><strong>Verify can't lock in answers.</strong> It approved 88 wrong guesses at P &gt; 0.9 against 19 right ones. It is only useful for rejecting strings the crossings spelled.</li>
+          <li><strong>Results vary a lot between runs, on few puzzles.</strong> One changed list can send the loop down a different path, and each ablation rests on two puzzles. More test puzzles would make tuning more trustworthy.</li>
+          <li><strong>Multiple choice only works with a short list.</strong> It finds the answer among a few dozen choices but rarely among hundreds, so slots with few known letters stay hard.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div>Sources: <code>src/crossword/solver/engine.py</code>, <code>search.py</code>, <code>prompts.py</code>, <code>candidates/ollama.py</code>, <code>README.md</code> (Results), <code>docs/m4-candidates.md</code>.</div>
+    <div>Figures as measured on 2026-11-12 with Ollama on an RTX 3060 12 GB.</div>
+  </footer>
+</main>

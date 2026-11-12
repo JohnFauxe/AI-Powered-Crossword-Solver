@@ -108,6 +108,9 @@ accepted by `solve`):
 
 ## How the solver works
 
+A visual overview with diagrams and a review is in
+[`docs/solver-overview.html`](docs/solver-overview.html).
+
 `src/crossword/solver/`:
 
 * `candidates/`: `ollama` (the local model; prompts in `prompts.py`,
