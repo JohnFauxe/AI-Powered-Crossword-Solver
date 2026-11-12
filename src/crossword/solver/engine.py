@@ -163,6 +163,7 @@ class EngineConfig:
     # Clue DB exclusion filters (eval); apply to lookup, few-shot and vocabulary.
     exclude_after: str | None = None
     exclude_sources: tuple[str, ...] = ()
+    cache: bool = True  # False: no cached model answers (fair timing in benchmarks)
 
     @classmethod
     def for_mode(cls, mode: Mode, **changes: Any) -> EngineConfig:
@@ -271,6 +272,7 @@ def build_sources(
     from crossword.solver.candidates.cluedb import ClueDB
     from crossword.solver.candidates.ollama import OllamaConfig, OllamaSource
     from crossword.solver.candidates.wordlist import WordList
+    from crossword.solver.models import apply_profile
 
     root = Path(data_root)
     if cluedb is None:
@@ -282,15 +284,17 @@ def build_sources(
     db = cluedb if cluedb.available() else None
     if wordlist is None:
         wordlist = WordList(cluedb=db)
-    cache = root / "cache.sqlite"
+    cache: Path | bool = root / "cache.sqlite" if config.cache else False
     fs_mode = "any" if config.fewshot == "any" else "other_length"
-    base = OllamaConfig(
-        model=config.model,
-        base_url=config.ollama_url,
-        concurrency=config.concurrency,
-        n_answers=config.n_answers,
-        constrain="none",
-        max_choices=config.max_choices,
+    base = apply_profile(
+        OllamaConfig(
+            model=config.model,
+            base_url=config.ollama_url,
+            concurrency=config.concurrency,
+            n_answers=config.n_answers,
+            constrain="none",
+            max_choices=config.max_choices,
+        )
     )
     first_cfg = base.with_(
         samples=config.samples,

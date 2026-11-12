@@ -19,10 +19,30 @@ def store(tmp_path):
     return Store(tmp_path / "data")
 
 
+def test_registry():
+    """Installed models as the tests see them (no Ollama)."""
+    from crossword.server.fakes import FakeRegistry
+    from crossword.solver.models import ModelInfo
+
+    return FakeRegistry(
+        [
+            ModelInfo("qwen2.5:7b", size=4_600_000_000, default=True),
+            ModelInfo("gemma3:12b", size=8_100_000_000),
+            ModelInfo("qwen3:14b", size=9_200_000_000),
+            ModelInfo("nomic-embed-text:latest", usable=False,
+                      reason="Embedding model: it can't answer clues."),
+        ],
+        default="qwen2.5:7b",
+    )
+
+
+test_registry.__test__ = False  # a helper, not a test
+
+
 @pytest.fixture
 def client(store):
     checks = {"cluedb": check_cluedb(store), "ollama": lambda: (False, "Ollama is off")}
-    return TestClient(create_app(store, health_checks=checks))
+    return TestClient(create_app(store, health_checks=checks, registry=test_registry()))
 
 
 @pytest.fixture
@@ -224,7 +244,7 @@ def test_check_and_reveal_409_without_solution(client):
 
 
 def test_runs_empty_and_filtered(client, store, mini_id):
-    assert client.get(f"/api/puzzles/{mini_id}/runs").json() == {"runs": {}}
+    assert client.get(f"/api/puzzles/{mini_id}/runs").json() == {"runs": []}
     puzzle = load(MINI)
     cells = puzzle.open_cells()
     fill = [
@@ -245,7 +265,8 @@ def test_runs_empty_and_filtered(client, store, mini_id):
         },
     )
     body = client.get(f"/api/puzzles/{mini_id}/runs").json()
-    run = body["runs"]["model"]
+    (run,) = body["runs"]
+    assert run["mode"] == "model" and run["model"] == "qwen2.5:7b"
     assert set(run) >= {"fill", "seconds", "rounds", "model", "accuracy", "slots_filled"}
     assert "log" not in run and "solution" not in run
     assert run["accuracy"]["letters_correct"] == len(cells) - 1
@@ -257,7 +278,7 @@ def test_runs_empty_and_filtered(client, store, mini_id):
     assert_no_solution(without_fill, puzzle)
 
     assert client.delete(f"/api/puzzles/{mini_id}/runs/model").status_code == 200
-    assert client.get(f"/api/puzzles/{mini_id}/runs").json() == {"runs": {}}
+    assert client.get(f"/api/puzzles/{mini_id}/runs").json() == {"runs": []}
 
 
 def test_runs_missing_puzzle(client):
@@ -291,7 +312,7 @@ def test_ollama_check_unreachable():
 
 
 def test_default_health_checks_run(store):
-    client = TestClient(create_app(store))
+    client = TestClient(create_app(store, registry=test_registry()))
     body = client.get("/api/health").json()
     assert set(body["sources"]) == {"cluedb", "ollama"}
 
@@ -299,7 +320,7 @@ def test_default_health_checks_run(store):
 # -------------------------------------------------------------------- solver
 
 
-def fake_jobs(store, *, delay=0.0):
+def fake_jobs(store, *, delay=0.0, registry=None):
     """Jobs whose sources answer every clue of the mini fixture, offline."""
     from crossword.server.jobs import Jobs
     from crossword.solver.candidates.wordlist import WordList
@@ -318,7 +339,8 @@ def fake_jobs(store, *, delay=0.0):
     def configure(mode):
         return EngineConfig.for_mode(mode, search_min=0.2, search_max=0.3, rounds=1)
 
-    jobs = Jobs(store, sources=sources, configure=configure)
+    jobs = Jobs(store, sources=sources, configure=configure,
+                registry=registry if registry is not None else test_registry())
     jobs.calls = calls
     return jobs
 
@@ -373,14 +395,16 @@ def test_solve_streams_and_saves_run(solver, store):
     events, ids = read_events(solver, job)
     assert ids == list(range(1, len(events) + 1))
     types = [e["type"] for e in events]
-    assert types[0] == "stage" and "fill" in types and types[-1] == "done"
-    assert all(e["mode"] == "model" for e in events)
-    run = solver.get(f"/api/puzzles/{pid}/runs").json()["runs"]["model"]
+    assert types[0] == "model" and types[1] == "stage" and "fill" in types
+    assert types[-2:] == ["done", "end"] and events[-1]["status"] == "done"
+    assert all(e["mode"] == "model" for e in events if e["type"] not in ("model", "end"))
+    assert all(e["model"] == "qwen2.5:7b" for e in events if e["type"] != "end")
+    (run,) = solver.get(f"/api/puzzles/{pid}/runs").json()["runs"]
     assert run["status"] == "done"
     assert run["accuracy"]["letters_correct"] == run["accuracy"]["letters_total"]
     assert run["seconds"] is not None and run["rounds"] >= 1
     assert "log" not in run
-    log = json.loads((store.root / "logs" / f"{pid}-model.json").read_text())
+    log = json.loads((store.root / "logs" / f"{pid}-model-qwen2.5-7b.json").read_text())
     assert log["slots"]["1-across"]["truth"] == "MEW"
     assert "log" not in store.load_runs(pid)["model"]  # the log is its own file
 
@@ -403,7 +427,7 @@ def test_fixed_letters_stay_out_of_the_run(solver):
         f"/api/puzzles/{pid}/solve", json={"mode": "model", "letters": letters}
     ).json()["job"]
     wait_job(solver, job)
-    fill = solver.get(f"/api/puzzles/{pid}/runs").json()["runs"]["model"]["fill"]
+    fill = solver.get(f"/api/puzzles/{pid}/runs").json()["runs"][0]["fill"]
     cells = {(f["r"], f["c"]) for f in fill}
     assert (1, 0) not in cells and (2, 2) not in cells
     assert len(cells) == len(load(MINI).open_cells()) - 2
@@ -411,7 +435,8 @@ def test_fixed_letters_stay_out_of_the_run(solver):
 
 def test_second_solve_is_409_and_cancel(store):
     checks = {"cluedb": lambda: (True, None), "ollama": lambda: (True, None)}
-    app = create_app(store, health_checks=checks, jobs=fake_jobs(store, delay=5.0))
+    app = create_app(store, health_checks=checks, jobs=fake_jobs(store, delay=5.0),
+                     registry=test_registry())
     with TestClient(app) as client:
         pid = add(client)
         other = add(client, FIXTURES / "midi_7x7.json")
@@ -427,8 +452,10 @@ def test_second_solve_is_409_and_cancel(store):
         assert resp.status_code == 200
         assert wait_job(client, job) == "cancelled"
         events, _ = read_events(client, job)
-        assert events[-1]["type"] == "done" and events[-1]["cancelled"] is True
-        assert events[-1]["total"] == len(load(MINI).slots)
+        assert events[-1] == {"type": "end", "status": "cancelled", "runs": 0, "count": 1,
+                              "kind": "solve"}
+        assert events[-2]["type"] == "done" and events[-2]["cancelled"] is True
+        assert events[-2]["total"] == len(load(MINI).slots)
         # The slot is free again.
         resp = client.post(f"/api/puzzles/{other}/solve", json={"mode": "model"})
         assert resp.status_code == 201

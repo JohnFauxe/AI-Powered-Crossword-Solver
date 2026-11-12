@@ -306,7 +306,8 @@ class OllamaSource:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._sem: asyncio.Semaphore | None = None
         self._avail: tuple[float, bool] | None = None
-        self.stats = {"requests": 0, "cache_hits": 0, "seconds": 0.0}
+        self.stats = {"requests": 0, "cache_hits": 0, "seconds": 0.0, "errors": 0}
+        self.last_error: str | None = None
 
     # ------------------------------------------------------------- plumbing
 
@@ -362,6 +363,16 @@ class OllamaSource:
             self.stats["seconds"] += time.monotonic() - t0
         r.raise_for_status()
         return r.json()
+
+    def _failed(self, e: Exception) -> None:
+        """Count a failed request (they are swallowed, so the caller can warn)."""
+        self.stats["errors"] += 1
+        if isinstance(e, httpx.HTTPStatusError):
+            self.last_error = f"HTTP {e.response.status_code}"
+        elif isinstance(e, httpx.TimeoutException):
+            self.last_error = "timed out"
+        else:
+            self.last_error = str(e) or type(e).__name__
 
     # ------------------------------------------------------------ candidates
 
@@ -551,7 +562,8 @@ class OllamaSource:
         pattern = _clean_pattern(pattern, length)
         try:
             lists = await self.araw(clue, length, pattern, choices)
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as e:
+            self._failed(e)
             return []
         return combine_samples(lists, length, pattern, self.name)
 
@@ -598,7 +610,8 @@ class OllamaSource:
         }
         try:
             reply = await self._chat(body)
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as e:
+            self._failed(e)
             return 0.5
         p = yes_probability(reply)
         self.cache.put(key, "verify", cfg.model, clue, p)

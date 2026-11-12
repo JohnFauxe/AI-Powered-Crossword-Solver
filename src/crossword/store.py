@@ -3,7 +3,8 @@
 Layout under the data directory (``$CROSSWORD_DATA``, default ``<repo>/data``)::
 
     puzzles/<id>.json     native puzzle JSON (with solution)
-    progress/<id>.json    {"letters": [[r, c, "A"], ...], "runs": {mode: run}, "updated": t}
+    progress/<id>.json    {"letters": [[r, c, "A"], ...], "runs": {"<mode>|<model>": run},
+                           "updated": t}
 
 Puzzle ids are ``<title-slug>-<8 hex>`` where the hex is a hash of the grid,
 solution and clues, so the same puzzle always gets the same id and uploading
@@ -31,6 +32,8 @@ from crossword.model import Cell, Puzzle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_VAR = "CROSSWORD_DATA"
+
+LEGACY_MODEL = "qwen2.5:7b"  # the model of runs stored before models were selectable
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
 _LETTERS_RE = re.compile(r"^[A-Z]+$")
@@ -183,32 +186,75 @@ class Store:
             self._write_progress(pid, doc)
 
     # ------------------------------------------------------------ solver runs
+    #
+    # A run is identified by (mode, model). Stored under ``runs`` as
+    # ``"<mode>|<model>"``; files written before models were selectable keyed
+    # runs by mode alone, and those read as (mode, the run's own "model"
+    # field, else LEGACY_MODEL).
 
-    def save_run(self, pid: str, mode: str, run: Mapping[str, Any]) -> None:
-        """Keep the latest solver run for one mode, replacing that mode's
-        previous run only. ``run`` must be JSON-serialisable; its shape is
-        owned by the engine. A ``saved_at`` timestamp is added."""
+    def save_run(
+        self, pid: str, mode: str, run: Mapping[str, Any], model: str | None = None
+    ) -> None:
+        """Keep the latest solver run for one (mode, model), replacing only
+        that pair's previous run. ``model`` defaults to ``run["model"]``, else
+        :data:`LEGACY_MODEL`. ``run`` must be JSON-serialisable; its shape is
+        owned by the engine. ``saved_at``, ``mode`` and ``model`` are set."""
         if not self.has_puzzle(pid):
             raise PuzzleNotFound(pid)
-        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", mode):
-            raise ValueError(f"bad mode name {mode!r}")
+        _check_mode(mode)
+        model = _check_model(model or _run_model(run))
         record = dict(run)
         record["saved_at"] = time.time()
+        record["mode"] = mode
+        record["model"] = model
         json.dumps(record)  # fail early, before touching the file
         with self._lock:
             doc = self._read_progress(pid)
-            doc.setdefault("runs", {})[mode] = record
+            runs = doc.setdefault("runs", {})
+            for k in [k for k, v in runs.items() if _run_key(k, v) == (mode, model)]:
+                del runs[k]
+            runs[run_key(mode, model)] = record
             self._write_progress(pid, doc)
 
-    def load_runs(self, pid: str) -> dict[str, dict[str, Any]]:
-        """Mode -> last run, for the modes that have one."""
-        return dict(self._read_progress(pid).get("runs", {}))
+    def all_runs(self, pid: str) -> list[dict[str, Any]]:
+        """Every stored run, each with ``mode`` and ``model`` set, oldest first."""
+        out = []
+        for k, v in self._read_progress(pid).get("runs", {}).items():
+            if not isinstance(v, dict):
+                continue
+            mode, model = _run_key(k, v)
+            out.append({**v, "mode": mode, "model": model})
+        out.sort(key=lambda r: r.get("saved_at") or 0)
+        return out
 
-    def clear_run(self, pid: str, mode: str) -> None:
+    def get_run(self, pid: str, mode: str, model: str) -> dict[str, Any] | None:
+        for r in self.all_runs(pid):
+            if r["mode"] == mode and r["model"] == model:
+                return r
+        return None
+
+    def load_runs(self, pid: str) -> dict[str, dict[str, Any]]:
+        """Mode -> its most recent run (any model), for the modes that have one."""
+        out: dict[str, dict[str, Any]] = {}
+        for r in self.all_runs(pid):  # oldest first, so the newest wins
+            out[r["mode"]] = r
+        return out
+
+    def clear_run(self, pid: str, mode: str, model: str | None = None) -> int:
+        """Drop one (mode, model) run, or every run of ``mode`` when ``model``
+        is None. Returns how many were removed."""
         with self._lock:
             doc = self._read_progress(pid)
-            if doc.get("runs", {}).pop(mode, None) is not None:
+            runs = doc.get("runs", {})
+            gone = [
+                k for k, v in runs.items()
+                if _run_key(k, v)[0] == mode and (model is None or _run_key(k, v)[1] == model)
+            ]
+            for k in gone:
+                del runs[k]
+            if gone:
                 self._write_progress(pid, doc)
+        return len(gone)
 
     # -------------------------------------------------------------- internals
 
@@ -223,6 +269,35 @@ class Store:
     def _write_progress(self, pid: str, doc: dict[str, Any]) -> None:
         doc["updated"] = time.time()
         _atomic_write(self._progress_path(pid), json.dumps(doc).encode("utf-8"))
+
+
+def run_key(mode: str, model: str) -> str:
+    return f"{mode}|{model}"
+
+
+def _run_model(run: Mapping[str, Any]) -> str:
+    m = run.get("model")
+    return m if isinstance(m, str) and m else LEGACY_MODEL
+
+
+def _run_key(key: str, run: Any) -> tuple[str, str]:
+    """(mode, model) of a stored entry, old (mode-only) keys included."""
+    if "|" in key:
+        mode, _, model = key.partition("|")
+        return mode, model
+    return key, _run_model(run if isinstance(run, Mapping) else {})
+
+
+def _check_mode(mode: str) -> str:
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", mode):
+        raise ValueError(f"bad mode name {mode!r}")
+    return mode
+
+
+def _check_model(model: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}", model):
+        raise ValueError(f"bad model name {model!r}")
+    return model
 
 
 def _check_id(pid: str) -> str:

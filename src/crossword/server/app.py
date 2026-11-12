@@ -17,11 +17,19 @@ Solving runs as jobs (:mod:`crossword.server.jobs`): ``POST
 its events as server-sent events (replayable: a late or reconnecting client
 gets every event from ``Last-Event-ID`` on), ``POST /api/solve/{job}/cancel``
 stops it. One job runs at a time; a second start gets a 409.
+
+Models: ``GET /api/models`` lists the installed Ollama models that can solve
+(:mod:`crossword.solver.models`). A solve takes ``models: [...]`` and runs
+each in turn; runs are stored per (mode, model) and ``GET .../runs`` returns
+them all. Benchmarks (``/api/bench``) run models x modes x puzzles as one job
+and save their results under ``<data>/bench/``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +45,7 @@ from crossword.model import Cell, Puzzle
 from crossword.server.jobs import Busy, Jobs, sse
 from crossword.solver.candidates.ollama import DEFAULT_MODEL
 from crossword.solver.engine import MODES, REBUS_MESSAGE
+from crossword.solver.models import ModelRegistry, same_model
 from crossword.store import PuzzleNotFound, Store
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
@@ -120,6 +129,15 @@ def _num(value: Any) -> float | int | None:
     return value if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
+def _cache_stats(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    req, hits = _num(value.get("requests")), _num(value.get("hits"))
+    if req is None or hits is None:
+        return None
+    return {"requests": int(req), "hits": int(hits)}
+
+
 def public_run(puzzle: Puzzle, mode: str, run: dict[str, Any]) -> dict[str, Any]:
     """A stored solver run reduced to what the UI may see.
 
@@ -162,6 +180,8 @@ def public_run(puzzle: Puzzle, mode: str, run: dict[str, Any]) -> dict[str, Any]
         "model": run.get("model") if isinstance(run.get("model"), str) else None,
         "status": run.get("status") if isinstance(run.get("status"), str) else "done",
         "saved_at": _num(run.get("saved_at")),
+        "cache": _cache_stats(run.get("cache")),
+        "failed": _num(run.get("failed")),
         "cells_filled": len(fill),
         "cells_total": len(puzzle.open_cells()),
         "slots_filled": slots_filled,
@@ -227,6 +247,7 @@ def create_app(
     web_dir: Path | None = WEB_DIR,
     health_checks: dict[str, HealthCheck] | None = None,
     jobs: Jobs | None = None,
+    registry: Any | None = None,
 ) -> FastAPI:
     """Build the app.
 
@@ -236,7 +257,9 @@ def create_app(
     Ollama's ``/api/tags``. ``web_dir=None`` skips the static files.
 
     ``jobs`` runs solves (default: :class:`Jobs` over the store, with the real
-    sources); tests pass one with fake sources.
+    sources); tests pass one with fake sources. ``registry`` lists the
+    installed models (default: the jobs' registry, else a
+    :class:`ModelRegistry` on the local Ollama).
 
     The store, checks and jobs are kept on ``app.state``. The static mount is
     added last so it never shadows an ``/api`` route.
@@ -244,9 +267,12 @@ def create_app(
     store = store or Store()
     checks = health_checks or {
         "cluedb": check_cluedb(store),
-        "ollama": check_ollama(),
+        # Ollama up; whether the chosen models are installed is checked per solve.
+        "ollama": check_ollama(model=None),
     }
-    jobs = jobs or Jobs(store)
+    if registry is None:
+        registry = getattr(jobs, "registry", None) or ModelRegistry()
+    jobs = jobs or Jobs(store, registry=registry)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -262,6 +288,7 @@ def create_app(
     app.state.store = store
     app.state.health_checks = checks
     app.state.jobs = jobs
+    app.state.registry = registry
     api = APIRouter(prefix="/api")
 
     def get_puzzle(pid: str) -> Puzzle:
@@ -416,21 +443,18 @@ def create_app(
 
     @api.get("/puzzles/{pid}/runs")
     def runs(pid: str) -> dict[str, Any]:
+        """Every stored run, oldest first: one per (mode, model)."""
         puzzle = get_puzzle(pid)
-        stored = store.load_runs(pid)
         return {
-            "runs": {
-                mode: public_run(puzzle, mode, run)
-                for mode, run in stored.items()
-                if isinstance(run, dict)
-            }
+            "runs": [public_run(puzzle, r["mode"], r) for r in store.all_runs(pid)]
         }
 
     @api.delete("/puzzles/{pid}/runs/{mode}")
-    def clear_run(pid: str, mode: str) -> dict[str, Any]:
+    def clear_run(pid: str, mode: str, model: str | None = None) -> dict[str, Any]:
+        """Drop the (mode, model) run, or every run of ``mode`` without ``model``."""
         get_puzzle(pid)
-        store.clear_run(pid, mode)
-        return {"cleared": mode}
+        n = store.clear_run(pid, mode, model)
+        return {"cleared": mode, "model": model, "removed": n}
 
     # -- health ----------------------------------------------------------
 
@@ -468,7 +492,7 @@ def create_app(
             "ok": True,
             "sources": sources,
             "modes": modes_from(sources),
-            "model": DEFAULT_MODEL,
+            "model": jobs.default_model or DEFAULT_MODEL,
             "running": running.public() if running else None,
         }
 
@@ -479,10 +503,62 @@ def create_app(
             raise HTTPException(422, f"mode must be one of {', '.join(MODES)}, not {mode!r}")
         return mode
 
+    def model_list() -> list[Any]:
+        try:
+            return registry.list()
+        except Exception:  # noqa: BLE001 - a broken registry must not break solving
+            return []
+
+    async def need_models(raw: Any) -> list[str]:
+        """The requested models, checked against the installed ones (skipped
+        when the listing is empty: then the Ollama health check decides)."""
+        if raw is None:
+            return [jobs.default_model]
+        if isinstance(raw, str):
+            raw = [x.strip() for x in raw.split(",")]
+        if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+            raise HTTPException(422, "'models' must be a list of model names")
+        names = [x for x in dict.fromkeys(raw) if x]
+        if not names:
+            raise HTTPException(422, "Choose at least one model.")
+        installed = await asyncio.to_thread(model_list)
+        if installed:
+            out = []
+            for name in names:
+                info = next((m for m in installed if same_model(m.name, name)), None)
+                if info is None:
+                    raise HTTPException(
+                        422, f"The model {name} isn't installed. Run: ollama pull {name}"
+                    )
+                if not info.usable:
+                    raise HTTPException(422, f"{info.name} can't solve: {info.reason}")
+                out.append(info.name)
+            return out
+        return names
+
+    def busy_409(pid: str | None = None) -> None:
+        msg = jobs.busy_message(pid)
+        if msg:
+            raise HTTPException(409, msg)
+
+    @api.get("/models")
+    def models() -> dict[str, Any]:
+        """Installed models: name, size, parameters, quantisation, usable (and
+        why not), fits (size vs VRAM, None if unknown), default."""
+        items = model_list()
+        default = jobs.default_model
+        return {
+            "models": [m.public() for m in items],
+            "default": default,
+            "vram": getattr(registry, "vram", lambda: None)(),
+            "error": getattr(registry, "error", None),
+        }
+
     @api.post("/puzzles/{pid}/solve", status_code=201)
     async def solve(pid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:  # noqa: B008
-        """Body: ``{"mode": "model"|"lookup", "letters": [[r, c, "A"], ...]}``.
-        The letters (the user's) are fixed: the solver never changes them."""
+        """Body: ``{"mode": "model"|"lookup", "models": ["qwen2.5:7b", ...],
+        "letters": [[r, c, "A"], ...]}``. Several models solve in turn as one
+        job. The letters (the user's) are fixed: the solver never changes them."""
         puzzle = get_puzzle(pid)
         mode = need_mode(body.get("mode", "model"))
         fixed = {
@@ -491,18 +567,13 @@ def create_app(
         }
         if not puzzle.solver_supported:
             raise HTTPException(422, REBUS_MESSAGE)
-        if jobs.current is not None and jobs.current.running:
-            raise HTTPException(
-                409,
-                "A solve is already running on this puzzle."
-                if jobs.current.puzzle_id == pid
-                else "A solve is already running on another puzzle.",
-            )
+        busy_409(pid)
         avail = modes_from(await asyncio.to_thread(run_checks))[mode]
         if not avail["available"]:
             raise HTTPException(503, avail["reason"])
+        chosen = await need_models(body.get("models"))
         try:
-            job = jobs.start(pid, puzzle, mode, fixed)  # type: ignore[arg-type]
+            job = jobs.start(pid, puzzle, mode, fixed, chosen)  # type: ignore[arg-type]
         except Busy as e:
             raise HTTPException(409, str(e)) from None
         except ValueError as e:
@@ -553,7 +624,11 @@ def create_app(
 
     @api.get("/puzzles/{pid}/candidates")
     async def candidates(
-        pid: str, slot: str | None = None, mode: str = "model", pattern: str | None = None
+        pid: str,
+        slot: str | None = None,
+        mode: str = "model",
+        pattern: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Ranked candidates for one clue in a mode (the "Suggest" hint).
         ``pattern``: the slot's known letters, ``.`` for unknown (default: the
@@ -576,9 +651,140 @@ def create_app(
         avail = modes_from(await asyncio.to_thread(run_checks))[mode]
         if not avail["available"]:
             raise HTTPException(503, avail["reason"])
+        chosen = (await need_models([model]))[0] if model else None
         clue = puzzle.clue_for(s.id)
-        found = await jobs.suggest(mode, clue.text if clue else "", s.length, pattern)  # type: ignore[arg-type]
-        return {"slot": s.id, "mode": mode, "pattern": pattern, "candidates": found}
+        found = await jobs.suggest(
+            mode, clue.text if clue else "", s.length, pattern, model=chosen  # type: ignore[arg-type]
+        )
+        return {
+            "slot": s.id, "mode": mode, "model": chosen or jobs.default_model,
+            "pattern": pattern, "candidates": found,
+        }
+
+    # -- benchmarks ------------------------------------------------------
+
+    def bench_path(bid: str) -> Path:
+        if not re.fullmatch(r"[0-9]{8}-[0-9]{6}(-[0-9]+)?", bid):
+            raise HTTPException(404, f"No benchmark {bid!r}")
+        return jobs.bench_dir() / f"{bid}.json"
+
+    def read_bench(path: Path) -> dict[str, Any] | None:
+        try:
+            doc = json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return None
+        return doc if isinstance(doc, dict) else None
+
+    def live_bench(bid: str) -> dict[str, Any] | None:
+        job = jobs.current
+        if job is not None and job.running and job.kind == "bench" and job.bench_id == bid:
+            doc = jobs.bench_doc(job)
+            doc["job"] = job.public()
+            return doc
+        return None
+
+    @api.get("/bench")
+    def bench_list() -> dict[str, Any]:
+        """Saved benchmarks, newest first (settings and result count), and the
+        running benchmark job if any."""
+        out = []
+        folder = jobs.bench_dir()
+        for path in sorted(folder.glob("*.json"), reverse=True) if folder.is_dir() else []:
+            doc = live_bench(path.stem) or read_bench(path)
+            if doc is None:
+                continue
+            out.append(
+                {
+                    "id": doc.get("id", path.stem),
+                    "created": doc.get("created"),
+                    "status": doc.get("status"),
+                    "settings": doc.get("settings", {}),
+                    "count": doc.get("count"),
+                    "done": len(doc.get("results") or []),
+                }
+            )
+        job = jobs.current
+        running = job.public() if job is not None and job.running else None
+        return {"benchmarks": out, "running": running}
+
+    @api.get("/bench/puzzles")
+    def bench_puzzles() -> dict[str, Any]:
+        """Stored puzzles a benchmark can score: those with a solution the
+        solver can fill."""
+        items = []
+        for s in store.list_puzzles():
+            try:
+                p = store.get_puzzle(s.id)
+            except (PuzzleNotFound, ValueError):
+                continue
+            if p.has_solution and p.solver_supported:
+                items.append({"id": s.id, "title": s.title, "width": s.width,
+                              "height": s.height, "slots": len(p.slots)})
+        return {"puzzles": items}
+
+    @api.get("/bench/{bid}")
+    def bench_read(bid: str) -> dict[str, Any]:
+        path = bench_path(bid)
+        doc = live_bench(bid) or read_bench(path)
+        if doc is None:
+            raise HTTPException(404, f"No benchmark {bid!r}")
+        return doc
+
+    @api.delete("/bench/{bid}")
+    def bench_delete(bid: str) -> dict[str, Any]:
+        path = bench_path(bid)
+        if live_bench(bid) is not None:
+            raise HTTPException(409, "This benchmark is still running. Cancel it first.")
+        if not path.exists():
+            raise HTTPException(404, f"No benchmark {bid!r}")
+        path.unlink()
+        return {"deleted": bid}
+
+    @api.post("/bench", status_code=201)
+    async def bench_start(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:  # noqa: B008
+        """Body: ``{"models": [...], "modes": ["model", "lookup"], "puzzles":
+        [ids] | "all", "ignore_cache": false}``. One job over every model x
+        mode x puzzle, model-major; follow it with ``/api/solve/{job}/events``
+        and stop it with ``/api/solve/{job}/cancel``."""
+        busy_409()
+        modes = body.get("modes") or ["model"]
+        if not isinstance(modes, list):
+            raise HTTPException(422, "'modes' must be a list")
+        modes = [need_mode(m) for m in dict.fromkeys(modes)]
+        sources = await asyncio.to_thread(run_checks)
+        avail = modes_from(sources)
+        for m in modes:
+            if not avail[m]["available"]:
+                raise HTTPException(503, avail[m]["reason"])
+        chosen = await need_models(body.get("models"))
+        raw = body.get("puzzles", "all")
+        candidates_ = bench_puzzles()["puzzles"]
+        if raw == "all":
+            ids = [p["id"] for p in candidates_]
+        elif isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+            ok = {p["id"] for p in candidates_}
+            for pid in raw:
+                if pid not in ok:
+                    get_puzzle(pid)  # 404 when absent
+                    raise HTTPException(
+                        422, f"Puzzle {pid} has no stored solution, so it can't be scored."
+                    )
+            ids = list(dict.fromkeys(raw))
+        else:
+            raise HTTPException(422, "'puzzles' must be a list of ids or \"all\"")
+        if not ids:
+            raise HTTPException(422, "No stored puzzle has a solution to score against.")
+        puzzles = [(pid, get_puzzle(pid)) for pid in ids]
+        try:
+            job = jobs.start_bench(
+                puzzles, chosen, modes,  # type: ignore[arg-type]
+                cache=not bool(body.get("ignore_cache")),
+            )
+        except Busy as e:
+            raise HTTPException(409, str(e)) from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        return job.public()
 
     app.include_router(api)
 

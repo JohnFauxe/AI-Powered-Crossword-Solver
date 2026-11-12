@@ -78,10 +78,16 @@ def cmd_convert(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
+    from crossword.server import fakes
     from crossword.server.app import create_app
 
+    if fakes.enabled():  # development and UI tests only: no Ollama, no GPU
+        app = fakes.fake_app()
+        print(f"{fakes.ENV_VAR} is set: FAKE models and sources, not Ollama.")
+    else:
+        app = create_app()
     print(f"Serving on http://127.0.0.1:{args.port}/")
-    uvicorn.run(create_app(), host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
 
