@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benchmark · Crossword</title>
+<link rel="stylesheet" href="css/app.css">
+<script src="js/theme-init.js"></script>
+<script type="module" src="js/bench.js"></script>
+</head>
+<body>
+<div class="page bench">
+  <header class="head">
+    <div>
+      <a class="back" href="./">← All puzzles</a>
+      <h1>Benchmark</h1>
+      <div class="byline">Compare local models on puzzles with stored solutions</div>
+    </div>
+    <button class="btn ghost" id="theme" type="button">Theme</button>
+  </header>
+
+  <section class="panel" aria-labelledby="new-h">
+    <h2 id="new-h">New benchmark</h2>
+    <div class="bench-form">
+      <fieldset>
+        <legend>Models</legend>
+        <div class="opts" id="models"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Modes</legend>
+        <div class="opts" id="modes">
+          <label class="check"><input type="checkbox" value="model" checked> <span class="dot model" aria-hidden="true"></span>Model</label>
+          <label class="check"><input type="checkbox" value="lookup"> <span class="dot lookup" aria-hidden="true"></span>Lookup</label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Puzzles</legend>
+        <label class="check all"><input type="checkbox" id="all-puzzles" checked> All puzzles with a solution</label>
+        <div class="opts" id="puzzles"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Timing</legend>
+        <label class="check"><input type="checkbox" id="ignore-cache"> Ignore cache</label>
+        <p class="hint">Cached answers make repeat runs much faster. Ignore the cache for fair times; answers are then asked again and not saved.</p>
+      </fieldset>
+    </div>
+    <div class="solver-row bench-run">
+      <button type="button" class="btn primary" id="run">Run benchmark</button>
+      <span class="status" id="status" role="status"></span>
+    </div>
+    <p class="solver-warn" id="warn" role="alert" hidden></p>
+    <div class="bench-progress" id="progress" hidden><span></span></div>
+  </section>
+
+  <section class="panel" id="results" aria-labelledby="res-h" hidden>
+    <h2 id="res-h">Results</h2>
+    <p class="res-meta" id="res-meta"></p>
+    <div class="table-wrap" id="table-wrap"></div>
+    <p class="hint" id="table-note"></p>
+    <figure class="chart" id="chart"></figure>
+  </section>
+
+  <section class="panel" aria-labelledby="past-h">
+    <h2 id="past-h">Past benchmarks</h2>
+    <ul class="past" id="past"></ul>
+    <p class="empty-list" id="past-empty" hidden>No benchmarks yet.</p>
+  </section>
+</div>
+</body>
+</html>
