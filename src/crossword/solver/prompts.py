@@ -117,6 +117,8 @@ def clue_aware_user(
     pattern: str | None,
     n: int,
     examples: Sequence[tuple[str, str]] = (),
+    *,
+    think: bool = False,
 ) -> str:
     parts = []
     if examples:
@@ -126,8 +128,32 @@ def clue_aware_user(
     hints = clue_hints(clue)
     if hints:
         parts.append("Notes:\n" + "\n".join(f"- {h}" for h in hints))
+    if think:
+        parts.append(
+            "First write brief thoughts (one or two sentences): what the clue means, any "
+            "wordplay, and words of the right length. Then the answers."
+        )
     parts.append(f'List {n} different candidate answers, best first, as {{"answers": [...]}}.')
     return "\n\n".join(parts)
+
+
+def choice_user(
+    clue: str,
+    length: int,
+    pattern: str | None,
+    n: int,
+    choices: Sequence[str],
+    examples: Sequence[tuple[str, str]] = (),
+) -> str:
+    """Multiple choice: the vocabulary words that fit the known letters."""
+    text = clue_aware_user(clue, length, pattern, n, examples)
+    head, _, _ = text.rpartition("\n\n")
+    return (
+        f"{head}\n\nWords that fit the known letters (most common first):\n"
+        f"{', '.join(choices)}\n\n"
+        f"The answer is probably one of these. Think about what the clue means, then pick "
+        f'the {n} most likely answers from the list, best first, as {{"answers": [...]}}.'
+    )
 
 
 def baseline_with_examples(
@@ -138,6 +164,32 @@ def baseline_with_examples(
         shots = "\n".join(f"- {c} -> {a}" for c, a in examples)
         text = f"Examples of past clues and answers:\n{shots}\n\n{text}"
     return text
+
+
+def feedback_user(previous: Sequence[str], length: int, pattern: str | None) -> str:
+    """Follow-up turn: which answers had the wrong letter count."""
+    from crossword.solver.candidates.base import matches, normalize_answer
+
+    good, bad = [], []
+    for raw in previous:
+        a = normalize_answer(raw)
+        if not a:
+            continue
+        (good if matches(a, length, pattern) else bad).append(a)
+    lines = []
+    if bad:
+        lines.append(
+            "These do not fit: "
+            + ", ".join(f"{a} ({len(a)} letters)" for a in bad[:12])
+            + f". The answer must have exactly {length} letters."
+        )
+    if good:
+        lines.append(f"These fit: {', '.join(good)}.")
+    lines.append(
+        f"Think of other words or phrases meaning the same thing that have exactly {length} "
+        f'letters (count them). List different new answers, best first, as {{"answers": [...]}}.'
+    )
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------- verify

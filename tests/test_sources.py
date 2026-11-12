@@ -161,6 +161,7 @@ def test_cluedb_similar_never_exact(dbpath):
     with_exact = db.similar("Feline", 10, exclude_exact=False)
     assert any(normalize_clue(s.clue) == "feline" for s in with_exact)
     assert all(len(s.answer) == 4 for s in db.similar("feline", 10, length=4))
+    assert all(len(s.answer) != 3 for s in db.similar("feline", 10, exclude_length=3))
     filtered = ClueDB(dbpath, exclude_sources=["newsrc"]).similar("Feline", 10)
     assert "KITTY" not in {s.answer for s in filtered}
 
@@ -424,3 +425,33 @@ def test_ollama_async_batch_concurrency(tmp_path):
     results = asyncio.run(run())
     assert [r[0].answer for r in results] == ["CAT", "DOG", "EEL", "OWL", "APE"]
     assert peak == 2
+
+
+def test_ollama_vocab_pass(tmp_path, words_file):
+    fake = FakeOllama({"Feline": [["COT", "CAT"]]})
+    vocab = WordList([words_file], cluedb=None)
+    src = OllamaSource(
+        OllamaConfig(vocab_pass=True, n_answers=10),
+        vocab=vocab,
+        cache_path=tmp_path / "c.sqlite",
+        transport=httpx.MockTransport(fake),
+    )
+    assert {c.answer for c in src.candidates("Feline", 3, "C.T")} == {"CAT", "COT"}
+    assert len(fake.requests) == 2  # free request + multiple-choice request
+    free, choice = fake.requests
+    assert "enum" not in free["format"]["properties"]["answers"]["items"]
+    items = choice["format"]["properties"]["answers"]
+    assert set(items["items"]["enum"]) == {"CAT", "COT", "CUT"}
+    assert items["maxItems"] == 3  # never more answers than choices
+    assert "CAT, COT, CUT" in choice["messages"][1]["content"]
+    # no pattern: no multiple-choice pass
+    src.candidates("Feline", 3, None)
+    assert len(fake.requests) == 3
+    # list capped at max_choices (most frequent first)
+    capped = OllamaSource(
+        OllamaConfig(vocab_pass=True, max_choices=2),
+        vocab=vocab,
+        cache_path=False,
+        transport=httpx.MockTransport(fake),
+    )
+    assert len(capped.choices(3, "C..")) == 2

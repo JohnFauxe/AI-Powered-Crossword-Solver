@@ -14,12 +14,19 @@ Techniques from the brief, each switchable in :class:`OllamaConfig`:
 5. Few-shot retrieval (``fewshot`` > 0 with a ``fewshot_db``): similar past
    clues from the clue DB as examples, never the exact clue, honouring the
    DB's exclusion filters.
-6. Constrained output (``structured``, ``constrain``): Ollama structured
-   output with a JSON schema; ``constrain="pattern"`` adds a regex per answer
-   so decoding itself enforces the length and the known letters.
+   ``fewshot_mode="other_length"`` keeps only examples whose answer length
+   differs from the slot's, so the true answer is never among them.
+6. Constrained output (``structured``, ``constrain``, ``vocab_pass``):
+   Ollama structured output with a JSON schema, so parsing never fails.
+   ``constrain="length"|"pattern"`` adds a regex per answer (measured: it
+   makes the 7B model truncate words it had in mind, so it is off).
+   ``vocab_pass`` is the constraint that works: when letters are known, one
+   extra request lists the vocabulary words fitting the pattern in the prompt
+   and restricts each answer to an enum of them (multiple choice:
+   recognition instead of recall).
 
-(Technique 3, pattern re-querying, is the engine's job: it calls this source
-again with a pattern.)
+Technique 3, pattern re-querying, is driven by the engine: it calls this
+source again with a pattern, which is where ``vocab_pass`` pays off.
 
 Results are cached in ``$CROSSWORD_DATA/cache.sqlite`` keyed by model, prompt
 version, technique options, clue, length, pattern and sample index.
@@ -31,6 +38,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import threading
 import time
@@ -46,6 +54,7 @@ from crossword.solver.candidates.base import Candidate, matches, normalize_answe
 
 if TYPE_CHECKING:
     from crossword.solver.candidates.cluedb import ClueDB
+    from crossword.solver.candidates.wordlist import WordList
 
 DEFAULT_MODEL = "qwen2.5:7b"
 DEFAULT_URL = "http://localhost:11434"
@@ -60,11 +69,26 @@ class OllamaConfig:
     base_url: str = DEFAULT_URL
     clue_aware: bool = True  # technique 1
     n_answers: int = 10  # technique 2: list length per request
+    force_n: bool = True  # schema minItems = n_answers (else the model often stops at 1-3)
+    think: bool = False  # a short "thoughts" field before the answers (reasoning first)
     samples: int = 1  # technique 2: requests per clue (first greedy, rest sampled)
     temperature: float = 0.7  # for samples after the first
     fewshot: int = 0  # technique 5: number of examples (0 = off; needs fewshot_db)
+    # "any": the most similar past clues. "other_length": only examples whose answer
+    # length differs from the slot's, so the true answer can never be shown.
+    fewshot_mode: Literal["any", "other_length"] = "any"
     structured: bool = True  # technique 6: JSON-schema output (else format="json")
-    constrain: Literal["none", "length", "pattern"] = "pattern"  # regex on each answer
+    # Per-answer regex in the schema: "length" or "pattern" (length + known letters).
+    # Measured: forcing letters makes the 7B model truncate or invent words, so "none".
+    constrain: Literal["none", "length", "pattern"] = "none"
+    # Multiple choice: when letters are known, one extra request lists the (up to
+    # max_choices most frequent) vocabulary words that fit and asks the model to
+    # pick, each answer an enum of those words. Needs ``vocab``.
+    vocab_pass: bool = True  # measured: the largest single gain once letters are known
+    # After the first answer list, a follow-up turn tells the model which answers
+    # had the wrong length (with their letter counts) and asks for more.
+    length_feedback: bool = False
+    max_choices: int = 150
     num_ctx: int = 2048
     seed: int = 0
     concurrency: int = 2
@@ -74,6 +98,12 @@ class OllamaConfig:
     def cache_options(self) -> str:
         """The semantic options, as a stable string for the cache key."""
         d = {k: v for k, v in asdict(self).items() if k not in _NON_SEMANTIC | {"model"}}
+        if self.fewshot_mode == "any":
+            d.pop("fewshot_mode")  # keeps keys of runs made before the option existed
+        if not self.length_feedback:
+            d.pop("length_feedback")
+        if not self.vocab_pass:
+            d.pop("max_choices")
         return json.dumps(d, sort_keys=True)
 
     def with_(self, **changes: Any) -> OllamaConfig:
@@ -98,17 +128,34 @@ def answer_regex(length: int, pattern: str | None) -> str:
     return "^" + "".join(out) + "$"
 
 
-def answers_schema(length: int, pattern: str | None, n: int, constrain: str) -> dict[str, Any]:
+def answers_schema(
+    length: int,
+    pattern: str | None,
+    n: int,
+    constrain: str,
+    *,
+    force_n: bool = False,
+    think: bool = False,
+    choices: Sequence[str] | None = None,
+) -> dict[str, Any]:
     item: dict[str, Any] = {"type": "string"}
-    if constrain == "length":
+    if choices:
+        item["enum"] = list(choices)
+        n = min(n, len(choices))
+    elif constrain == "length":
         item["pattern"] = answer_regex(length, None)
     elif constrain == "pattern":
         item["pattern"] = answer_regex(length, pattern)
-    return {
-        "type": "object",
-        "properties": {"answers": {"type": "array", "items": item, "minItems": 1, "maxItems": n}},
-        "required": ["answers"],
+    props: dict[str, Any] = {}
+    if think:
+        props["thoughts"] = {"type": "string", "maxLength": 400}
+    props["answers"] = {
+        "type": "array",
+        "items": item,
+        "minItems": n if force_n else 1,
+        "maxItems": n,
     }
+    return {"type": "object", "properties": props, "required": list(props)}
 
 
 def combine_samples(
@@ -145,18 +192,21 @@ def parse_answers(content: str) -> list[str]:
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        start, end = content.find("["), content.rfind("]")
-        if start < 0 or end <= start:
+        # Truncated or loose output: take the quoted strings after "answers".
+        content = str(content or "")
+        tail = content[content.find('"answers"') + 9 :] if '"answers"' in content else content
+        start = tail.find("[")
+        if start < 0:
             return []
-        try:
-            data = json.loads(content[start : end + 1])
-        except json.JSONDecodeError:
-            return []
+        return _QUOTED.findall(tail[start:])
     if isinstance(data, dict):
         data = data.get("answers", next((v for v in data.values() if isinstance(v, list)), []))
     if not isinstance(data, list):
         return []
     return [str(x) for x in data if isinstance(x, (str, int, float))]
+
+
+_QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 
 class Cache:
@@ -236,11 +286,13 @@ class OllamaSource:
         config: OllamaConfig | None = None,
         *,
         fewshot_db: ClueDB | None = None,
+        vocab: WordList | None = None,
         cache_path: str | Path | None | Literal[False] = None,
         transport: httpx.AsyncBaseTransport | httpx.BaseTransport | None = None,
     ) -> None:
         self.config = config or OllamaConfig()
         self.fewshot_db = fewshot_db
+        self.vocab = vocab
         if cache_path is False:
             self.cache = Cache(None)
         else:
@@ -311,11 +363,14 @@ class OllamaSource:
 
     def examples(self, clue: str, length: int) -> list[tuple[str, str]]:
         """Few-shot examples for ``clue`` (never the clue itself)."""
-        if self.config.fewshot <= 0 or self.fewshot_db is None:
+        cfg = self.config
+        if cfg.fewshot <= 0 or self.fewshot_db is None:
             return []
         if not self.fewshot_db.available():
             return []
-        return [(s.clue, s.answer) for s in self.fewshot_db.similar(clue, self.config.fewshot)]
+        other = length if cfg.fewshot_mode == "other_length" else None
+        sims = self.fewshot_db.similar(clue, cfg.fewshot, exclude_length=other)
+        return [(s.clue, s.answer) for s in sims]
 
     def build_request(
         self,
@@ -324,16 +379,33 @@ class OllamaSource:
         pattern: str | None,
         sample: int,
         examples: Sequence[tuple[str, str]] = (),
+        choices: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         cfg = self.config
         n = cfg.n_answers
-        if cfg.clue_aware:
+        if choices:
+            n = min(n, len(choices))
             system = prompts.CLUE_AWARE_SYSTEM
-            user = prompts.clue_aware_user(clue, length, pattern, n, examples)
+            user = prompts.choice_user(clue, length, pattern, n, choices, examples)
+        elif cfg.clue_aware:
+            system = prompts.CLUE_AWARE_SYSTEM
+            user = prompts.clue_aware_user(clue, length, pattern, n, examples, think=cfg.think)
         else:
             system = prompts.BASELINE_SYSTEM
             user = prompts.baseline_with_examples(clue, length, pattern, n, examples)
-        fmt: Any = answers_schema(length, pattern, n, cfg.constrain) if cfg.structured else "json"
+        fmt: Any = (
+            answers_schema(
+                length,
+                pattern,
+                n,
+                cfg.constrain,
+                force_n=cfg.force_n,
+                think=cfg.think and not choices,
+                choices=choices,
+            )
+            if cfg.structured
+            else "json"
+        )
         return {
             "model": cfg.model,
             "stream": False,
@@ -347,9 +419,17 @@ class OllamaSource:
                 "temperature": 0.0 if sample == 0 else cfg.temperature,
                 "seed": cfg.seed + sample,
                 "num_ctx": cfg.num_ctx,
-                "num_predict": n * (length + 6) + 20,
+                "num_predict": n * (max(length, 8) + 8) + (250 if cfg.think else 20),
             },
         }
+
+    def choices(self, length: int, pattern: str | None) -> list[str] | None:
+        """Words for the multiple-choice pass, most frequent first, or None."""
+        cfg = self.config
+        if not cfg.vocab_pass or self.vocab is None or not pattern:
+            return None
+        words = self.vocab.match(length, pattern, cfg.max_choices)
+        return [w for w, _ in words] or None
 
     async def _sample(
         self,
@@ -358,8 +438,10 @@ class OllamaSource:
         pattern: str | None,
         sample: int,
         examples: Sequence[tuple[str, str]],
+        choices: Sequence[str] | None = None,
     ) -> list[str]:
         cfg = self.config
+        choice_key = hashlib.sha1("\n".join(choices).encode()).hexdigest() if choices else None
         key = Cache.key(
             [
                 "cand",
@@ -371,13 +453,14 @@ class OllamaSource:
                 pattern,
                 sample,
                 list(examples),
+                choice_key,
             ]
         )
         hit = self.cache.get(key)
         if hit is not None:
             self.stats["cache_hits"] += 1
             return list(hit)
-        body = self.build_request(clue, length, pattern, sample, examples)
+        body = self.build_request(clue, length, pattern, sample, examples, choices)
         reply = await self._chat(body)
         answers = parse_answers(reply.get("message", {}).get("content", ""))
         self.cache.put(key, "cand", cfg.model, clue, answers)
@@ -387,14 +470,54 @@ class OllamaSource:
         """The model's raw answer lists, one per sample (for logging/eval)."""
         pattern = _clean_pattern(pattern, length)
         examples = self.examples(clue, length)
-        return list(
-            await asyncio.gather(
-                *(
-                    self._sample(clue, length, pattern, s, examples)
-                    for s in range(max(1, self.config.samples))
-                )
-            )
+        jobs = [
+            self._sample(clue, length, pattern, s, examples)
+            for s in range(max(1, self.config.samples))
+        ]
+        choices = self.choices(length, pattern)
+        if choices:
+            jobs.append(self._sample(clue, length, pattern, 0, examples, choices))
+        lists = list(await asyncio.gather(*jobs))
+        if self.config.length_feedback:
+            lists.append(await self._feedback(clue, length, pattern, examples, lists[0]))
+        return lists
+
+    async def _feedback(
+        self,
+        clue: str,
+        length: int,
+        pattern: str | None,
+        examples: Sequence[tuple[str, str]],
+        first: list[str],
+    ) -> list[str]:
+        """Second turn: point out wrong-length answers and ask for more."""
+        cfg = self.config
+        key = Cache.key(
+            [
+                "feedback",
+                cfg.model,
+                prompts.PROMPT_VERSION,
+                cfg.cache_options(),
+                clue,
+                length,
+                pattern,
+                list(examples),
+                first,
+            ]
         )
+        hit = self.cache.get(key)
+        if hit is not None:
+            self.stats["cache_hits"] += 1
+            return list(hit)
+        body = self.build_request(clue, length, pattern, 0, examples)
+        body["messages"].append({"role": "assistant", "content": json.dumps({"answers": first})})
+        body["messages"].append(
+            {"role": "user", "content": prompts.feedback_user(first, length, pattern)}
+        )
+        reply = await self._chat(body)
+        answers = parse_answers(reply.get("message", {}).get("content", ""))
+        self.cache.put(key, "feedback", cfg.model, clue, answers)
+        return answers
 
     async def acandidates(
         self, clue: str, length: int, pattern: str | None = None

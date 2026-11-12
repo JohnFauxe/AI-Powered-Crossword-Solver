@@ -336,12 +336,15 @@ class ClueDB:
         *,
         length: int | None = None,
         exclude_exact: bool = True,
+        exclude_length: int | None = None,
     ) -> list[SimilarClue]:
         """Up to ``k`` past clues most like ``clue`` (BM25), with their answers.
 
         ``exclude_exact`` (default) drops every row whose normalised clue
         equals ``clue``'s, so few-shot prompting never hands the model the
-        answer. ``length`` restricts to answers of that length. Distinct
+        answer. ``length`` restricts to answers of that length;
+        ``exclude_length`` drops answers of that length (so the true answer of a
+        slot of that length can never be among the examples). Distinct
         (clue, answer) pairs only. Honours the exclusion filters.
         """
         if not self.available() or k <= 0:
@@ -361,7 +364,7 @@ class ClueDB:
                    ORDER BY rank LIMIT ?) f
                 CROSS JOIN clues c ON c.id = f.rowid WHERE 1{fsql}
                 ORDER BY f.rank""",
-                [query, max(50, k * 10), *fargs],
+                [query, max(50, k * (30 if exclude_length else 10)), *fargs],
             )
             .fetchall()
         )
@@ -369,6 +372,8 @@ class ClueDB:
         seen: set[tuple[str, str]] = set()
         for text, cnorm, answer, rank in rows:
             if exclude_exact and cnorm == norm:
+                continue
+            if exclude_length is not None and len(answer) == exclude_length:
                 continue
             if (cnorm, answer) in seen:
                 continue
