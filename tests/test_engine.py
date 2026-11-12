@@ -347,12 +347,12 @@ def test_eval_recall_and_table():
     row = evaluate.score(engine, MINI, "default", 1.0)
     assert row.letters == 1.0 and row.perfect and row.first["r@5"] == 1.0
     assert row.held_out == "n/a (no clue lookup)"
-    other = dict(row.as_json(), mode="lookup", held_out="NOT held out by any filter")
+    other = dict(row.as_json(), mode="lookup", held_out="NOT held out")
     text = evaluate.table([other, row, dict(row.as_json(), puzzle="b.json")])
     lines = text.splitlines()
     assert lines[1].startswith("model")  # model mode first, the headline
     assert any("MEAN" in x and "2/2" in x for x in lines)
-    assert text.endswith("held out: NOT held out by any filter")
+    assert text.endswith("held out: NOT held out")
 
 
 def test_cli_engine_switches():

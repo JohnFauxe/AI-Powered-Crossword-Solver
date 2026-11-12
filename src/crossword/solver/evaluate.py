@@ -82,8 +82,13 @@ def held_out(puzzle: Puzzle, config: EngineConfig) -> str:
         bits.append(f"sources {','.join(config.exclude_sources)} excluded")
     date = puzzle.meta.date or ""
     if date and date > CLUEDB_COLLECTED:
-        bits.append(f"puzzle dated {date}, DB collected {CLUEDB_COLLECTED}")
-    return "; ".join(bits) or "NOT held out by any filter"
+        bits.append(f"puzzle dated {date}, after the DB was collected ({CLUEDB_COLLECTED})")
+    elif not date:
+        bits.append(
+            f"no DB filter; puzzle undated, DB collected {CLUEDB_COLLECTED}: held out only "
+            "if the puzzle is newer"
+        )
+    return "; ".join(bits) or "NOT held out: the puzzle predates the DB"
 
 
 def score(engine: Engine, path: Path, label: str, seconds: float) -> Row:

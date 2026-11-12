@@ -152,6 +152,12 @@ class EngineConfig:
     search_per_cell: float = 0.02
     search_min: float = 2.0
     search_max: float = 8.0
+    # Reported cell confidence (UI shading, the stored run): min(search marginal,
+    # calibration[n]) where n = slots through the cell whose answer came from a
+    # clue-reading list with confidence >= settle_conf. The search's marginals
+    # are overconfident; these are the measured shares of correct cells
+    # (model: uc + ucs runs; lookup: uc). Internals use the raw marginals.
+    calibration: tuple[float, float, float] = (0.33, 0.58, 0.76)
     time_budget: float = 600.0  # whole solve, seconds; refine rounds stop past it
     seed: int = 0
     # Clue DB exclusion filters (eval); apply to lookup, few-shot and vocabulary.
@@ -166,7 +172,7 @@ class EngineConfig:
             raise ValueError(f"unknown mode {mode!r}; expected model or lookup")
         base: dict[str, Any] = {"mode": mode}
         if mode == "lookup":
-            base.update(fewshot="any", first_fewshot=10)
+            base.update(fewshot="any", first_fewshot=10, calibration=(0.4, 0.81, 0.99))
         base.update(changes)
         return cls(**base)
 
@@ -571,13 +577,31 @@ class Engine:
         self.timings["search"] += self.clock() - t0
         return res
 
-    def fill_event(self, res: SearchResult, only: set[Cell] | None = None) -> dict[str, Any]:
-        cells = [
-            {"r": r, "c": c, "letter": f.letter, "confidence": round(f.confidence, 3)}
+    def shown_confidence(self, res: SearchResult, cell: Cell, conf: float) -> float:
+        """Calibrated confidence of a cell (see ``EngineConfig.calibration``)."""
+        cfg = self.config
+        n = 0
+        for st in self.crossers.get(cell, ()):
+            sf = res.slots.get(st.id)
+            if sf and sf.answer and sf.source in LISTED and sf.confidence >= cfg.settle_conf:
+                n += 1
+        cap = cfg.calibration[min(n, len(cfg.calibration) - 1)]
+        return round(min(conf, cap), 3)
+
+    def fill_cells(self, res: SearchResult, only: set[Cell] | None = None) -> list[dict[str, Any]]:
+        return [
+            {
+                "r": r,
+                "c": c,
+                "letter": f.letter,
+                "confidence": self.shown_confidence(res, (r, c), f.confidence),
+            }
             for (r, c), f in sorted(res.cells.items())
             if (r, c) not in self.fixed and (only is None or (r, c) in only)
         ]
-        return self.ev(type="fill", cells=cells)
+
+    def fill_event(self, res: SearchResult, only: set[Cell] | None = None) -> dict[str, Any]:
+        return self.ev(type="fill", cells=self.fill_cells(res, only))
 
     def adopt(self, res: SearchResult, round_no: int) -> list[dict[str, Any]]:
         """Take a search result as the current fill; return slot events for changes."""
@@ -623,11 +647,7 @@ class Engine:
         fill = []
         slots: dict[str, dict[str, Any]] = {}
         if res is not None:
-            fill = [
-                {"r": r, "c": c, "letter": f.letter, "confidence": round(f.confidence, 3)}
-                for (r, c), f in sorted(res.cells.items())
-                if (r, c) not in self.fixed
-            ]
+            fill = self.fill_cells(res)
         for s in self.slots:
             slots[s.id] = {
                 "answer": s.answer,
@@ -645,10 +665,12 @@ class Engine:
         )
 
     def filled_slots(self) -> int:
+        """Slots the solver has an answer for (a word from some list, not just
+        letters the crossings spelled)."""
         res = self.last
         if res is None:
             return 0
-        return sum(1 for s in self.slots if all(c in res.cells for c in s.cells))
+        return sum(1 for s in self.slots if s.answer is not None)
 
     # ------------------------------------------------------------ querying
 
