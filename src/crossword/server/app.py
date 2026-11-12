@@ -12,29 +12,37 @@ Uploads (``POST /api/puzzles``) take the file's raw bytes as the request body.
 The file name, which helps format detection, goes in the ``filename`` query
 parameter or the ``X-Filename`` header.
 
-Solving routes are stubs answering 501 until the engine is wired in; see
-``SOLVER_NOT_READY``.
+Solving runs as jobs (:mod:`crossword.server.jobs`): ``POST
+/api/puzzles/{id}/solve`` starts one, ``GET /api/solve/{job}/events`` streams
+its events as server-sent events (replayable: a late or reconnecting client
+gets every event from ``Last-Event-ID`` on), ``POST /api/solve/{job}/cancel``
+stops it. One job runs at a time; a second start gets a 409.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from crossword.formats import FormatError, loads
 from crossword.model import Cell, Puzzle
+from crossword.server.jobs import Busy, Jobs, sse
+from crossword.solver.candidates.ollama import DEFAULT_MODEL
+from crossword.solver.engine import MODES, REBUS_MESSAGE
 from crossword.store import PuzzleNotFound, Store
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
 OLLAMA_URL = "http://localhost:11434"
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
-SOLVER_NOT_READY = "The solver isn't connected to the web app yet."
+OLLAMA_DOWN = "The local model isn't running. Start Ollama to use Model mode."
 
 HealthCheck = Callable[[], tuple[bool, str | None]]
 
@@ -186,14 +194,25 @@ def check_cluedb(store: Store) -> HealthCheck:
     return check
 
 
-def check_ollama(url: str = OLLAMA_URL, timeout: float = 1.0) -> HealthCheck:
+def check_ollama(
+    url: str = OLLAMA_URL, timeout: float = 1.0, model: str | None = DEFAULT_MODEL
+) -> HealthCheck:
+    """Ollama answers and (unless ``model`` is None) has ``model`` installed."""
+
     def check() -> tuple[bool, str | None]:
         try:
             resp = httpx.get(f"{url.rstrip('/')}/api/tags", timeout=timeout)
         except httpx.HTTPError:
-            return False, "The local model isn't running. Start Ollama to use Model mode."
+            return False, OLLAMA_DOWN
         if resp.status_code != 200:
             return False, f"Ollama answered with HTTP {resp.status_code}."
+        if model:
+            try:
+                names = {m.get("name") for m in resp.json().get("models", [])}
+            except (ValueError, AttributeError):
+                names = set()
+            if model not in names and f"{model}:latest" not in names:
+                return False, f"The model {model} isn't installed. Run: ollama pull {model}"
         return True, None
 
     return check
@@ -207,6 +226,7 @@ def create_app(
     *,
     web_dir: Path | None = WEB_DIR,
     health_checks: dict[str, HealthCheck] | None = None,
+    jobs: Jobs | None = None,
 ) -> FastAPI:
     """Build the app.
 
@@ -215,19 +235,33 @@ def create_app(
     ``(available, reason)``; the defaults check ``<data>/cluedb.sqlite`` and
     Ollama's ``/api/tags``. ``web_dir=None`` skips the static files.
 
-    The store and checks are kept on ``app.state`` (``store``,
-    ``health_checks``). The four solver routes at the end of the API are
-    501 stubs; replace their bodies when the engine is wired in. The static
-    mount is added last so it never shadows an ``/api`` route.
+    ``jobs`` runs solves (default: :class:`Jobs` over the store, with the real
+    sources); tests pass one with fake sources.
+
+    The store, checks and jobs are kept on ``app.state``. The static mount is
+    added last so it never shadows an ``/api`` route.
     """
     store = store or Store()
     checks = health_checks or {
         "cluedb": check_cluedb(store),
         "ollama": check_ollama(),
     }
-    app = FastAPI(title="Crossword", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    jobs = jobs or Jobs(store)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await jobs.shutdown()
+
+    app = FastAPI(
+        title="Crossword",
+        docs_url="/api/docs",
+        openapi_url="/api/openapi.json",
+        lifespan=lifespan,
+    )
     app.state.store = store
     app.state.health_checks = checks
+    app.state.jobs = jobs
     api = APIRouter(prefix="/api")
 
     def get_puzzle(pid: str) -> Puzzle:
@@ -400,8 +434,7 @@ def create_app(
 
     # -- health ----------------------------------------------------------
 
-    @api.get("/health")
-    def health() -> dict[str, Any]:
+    def run_checks() -> dict[str, dict[str, Any]]:
         sources = {}
         for name, fn in checks.items():
             try:
@@ -409,47 +442,143 @@ def create_app(
             except Exception as e:  # a broken check must not break the page
                 ok, reason = False, f"Check failed: {e}"
             sources[name] = {"available": ok, "reason": None if ok else reason}
+        return sources
+
+    def modes_from(sources: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         ollama = sources.get("ollama", {"available": False, "reason": "Not checked"})
         cluedb = sources.get("cluedb", {"available": False, "reason": "Not checked"})
         return {
-            "ok": True,
-            "sources": sources,
-            "modes": {
-                "model": ollama,
-                "lookup": (
-                    cluedb
-                    if cluedb["available"]
-                    else {
-                        "available": False,
-                        "reason": "Clue database not built. Lookup mode is unavailable.",
-                        "hint": cluedb["reason"],
-                    }
-                ),
-            },
+            "model": ollama,
+            "lookup": (
+                cluedb
+                if cluedb["available"]
+                else {
+                    "available": False,
+                    "reason": "Clue database not built. Lookup mode is unavailable.",
+                    "hint": cluedb["reason"],
+                }
+            ),
         }
 
-    # -- solver stubs (501) -------------------------------------------------
+    @api.get("/health")
+    def health() -> dict[str, Any]:
+        sources = run_checks()
+        running = jobs.current if jobs.current is not None and jobs.current.running else None
+        return {
+            "ok": True,
+            "sources": sources,
+            "modes": modes_from(sources),
+            "model": DEFAULT_MODEL,
+            "running": running.public() if running else None,
+        }
 
-    def not_ready() -> JSONResponse:
-        return JSONResponse({"detail": SOLVER_NOT_READY}, status_code=501)
+    # -- solver ------------------------------------------------------------
 
-    @api.post("/puzzles/{pid}/solve")
-    def solve(pid: str) -> JSONResponse:
-        get_puzzle(pid)
-        return not_ready()
+    def need_mode(mode: Any) -> str:
+        if mode not in MODES:
+            raise HTTPException(422, f"mode must be one of {', '.join(MODES)}, not {mode!r}")
+        return mode
 
-    @api.get("/solve/{job}/events")
-    def solve_events(job: str) -> JSONResponse:
-        return not_ready()
+    @api.post("/puzzles/{pid}/solve", status_code=201)
+    async def solve(pid: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:  # noqa: B008
+        """Body: ``{"mode": "model"|"lookup", "letters": [[r, c, "A"], ...]}``.
+        The letters (the user's) are fixed: the solver never changes them."""
+        puzzle = get_puzzle(pid)
+        mode = need_mode(body.get("mode", "model"))
+        fixed = {
+            cell: ch for cell, ch in _letters(body.get("letters")).items()
+            if puzzle.is_open(*cell)
+        }
+        if not puzzle.solver_supported:
+            raise HTTPException(422, REBUS_MESSAGE)
+        if jobs.current is not None and jobs.current.running:
+            raise HTTPException(
+                409,
+                "A solve is already running on this puzzle."
+                if jobs.current.puzzle_id == pid
+                else "A solve is already running on another puzzle.",
+            )
+        avail = modes_from(await asyncio.to_thread(run_checks))[mode]
+        if not avail["available"]:
+            raise HTTPException(503, avail["reason"])
+        try:
+            job = jobs.start(pid, puzzle, mode, fixed)  # type: ignore[arg-type]
+        except Busy as e:
+            raise HTTPException(409, str(e)) from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        return job.public()
 
-    @api.post("/solve/{job}/cancel")
-    def solve_cancel(job: str) -> JSONResponse:
-        return not_ready()
+    def get_job(job_id: str):
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, f"No solve job {job_id!r}")
+        return job
+
+    @api.get("/solve/{job_id}")
+    def solve_status(job_id: str) -> dict[str, Any]:
+        return get_job(job_id).public()
+
+    @api.get("/solve/{job_id}/events")
+    async def solve_events(job_id: str, request: Request) -> StreamingResponse:
+        """Server-sent events. Each has ``id`` = its 1-based position, so a
+        client reconnecting with ``Last-Event-ID`` (or ``?from=N``) resumes
+        after event N; with neither, the whole run so far is replayed."""
+        job = get_job(job_id)
+        raw = request.headers.get("last-event-id") or request.query_params.get("from") or "0"
+        try:
+            start = max(0, int(raw))
+        except ValueError:
+            start = 0
+
+        async def gen():
+            async for i, ev in job.stream(start):
+                if await request.is_disconnected():
+                    return
+                yield sse(i, ev)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @api.post("/solve/{job_id}/cancel")
+    def solve_cancel(job_id: str) -> dict[str, Any]:
+        job = get_job(job_id)
+        jobs.cancel(job_id)
+        out = job.public()
+        out["cancelling"] = job.running
+        return out
 
     @api.get("/puzzles/{pid}/candidates")
-    def candidates(pid: str, slot: str | None = None, mode: str = "model") -> JSONResponse:
-        get_puzzle(pid)
-        return not_ready()
+    async def candidates(
+        pid: str, slot: str | None = None, mode: str = "model", pattern: str | None = None
+    ) -> dict[str, Any]:
+        """Ranked candidates for one clue in a mode (the "Suggest" hint).
+        ``pattern``: the slot's known letters, ``.`` for unknown (default: the
+        saved progress)."""
+        puzzle = get_puzzle(pid)
+        mode = need_mode(mode)
+        if not slot:
+            raise HTTPException(422, "Give a slot, e.g. ?slot=12-down")
+        try:
+            s = puzzle.slot(slot)
+        except (KeyError, ValueError):
+            raise HTTPException(404, f"No slot {slot!r} in this puzzle") from None
+        if pattern is not None and len(pattern) != s.length:
+            raise HTTPException(422, f"pattern must have {s.length} characters")
+        if pattern is None:
+            saved = store.load_progress(pid)
+            pattern = "".join(
+                (saved.get(cell) or ".")[:1] for cell in s.cells
+            )
+        avail = modes_from(await asyncio.to_thread(run_checks))[mode]
+        if not avail["available"]:
+            raise HTTPException(503, avail["reason"])
+        clue = puzzle.clue_for(s.id)
+        found = await jobs.suggest(mode, clue.text if clue else "", s.length, pattern)  # type: ignore[arg-type]
+        return {"slot": s.id, "mode": mode, "pattern": pattern, "candidates": found}
 
     app.include_router(api)
 

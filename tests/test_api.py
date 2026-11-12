@@ -1,10 +1,12 @@
 import json
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from crossword.formats import dumps, load
 from crossword.server.app import check_cluedb, check_ollama, create_app
+from crossword.solver.engine import REBUS_MESSAGE
 from crossword.store import Store
 
 from conftest import FIXTURES, SAMPLE_FILES, needs_samples
@@ -294,19 +296,212 @@ def test_default_health_checks_run(store):
     assert set(body["sources"]) == {"cluedb", "ollama"}
 
 
-# --------------------------------------------------------------- solver stubs
+# -------------------------------------------------------------------- solver
 
 
-def test_solver_routes_are_501(client, mini_id):
-    for method, path in (
-        ("post", f"/api/puzzles/{mini_id}/solve"),
-        ("get", "/api/solve/job1/events"),
-        ("post", "/api/solve/job1/cancel"),
-        ("get", f"/api/puzzles/{mini_id}/candidates?slot=1-across&mode=model"),
-    ):
-        resp = getattr(client, method)(path)
-        assert resp.status_code == 501, path
-        assert resp.json()["detail"]
+def fake_jobs(store, *, delay=0.0):
+    """Jobs whose sources answer every clue of the mini fixture, offline."""
+    from crossword.server.jobs import Jobs
+    from crossword.solver.candidates.wordlist import WordList
+    from crossword.solver.engine import EngineConfig, Sources
+    from test_engine import FakeModel, oracle_table, words_of
+
+    puzzle = load(MINI)
+    calls = {"sources": 0}
+
+    def sources(config):
+        calls["sources"] += 1
+        model = FakeModel(oracle_table(puzzle), delay=delay)
+        vocab = WordList(paths=[], cluedb=None, words=words_of(puzzle))
+        return Sources(first=model, requery=model, wordlist=vocab)
+
+    def configure(mode):
+        return EngineConfig.for_mode(mode, search_min=0.2, search_max=0.3, rounds=1)
+
+    jobs = Jobs(store, sources=sources, configure=configure)
+    jobs.calls = calls
+    return jobs
+
+
+@pytest.fixture
+def solver(store):
+    checks = {"cluedb": lambda: (False, "no db"), "ollama": lambda: (True, None)}
+    app = create_app(store, health_checks=checks, jobs=fake_jobs(store))
+    with TestClient(app) as c:
+        yield c
+
+
+def add(client, path=MINI):
+    resp = client.post(f"/api/puzzles?filename={path.name}", content=path.read_bytes())
+    return resp.json()["id"]
+
+
+def wait_job(client, job, timeout=10.0):
+    import time
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        status = client.get(f"/api/solve/{job}").json()["status"]
+        if status != "running":
+            return status
+        time.sleep(0.02)
+    raise AssertionError("job did not finish")
+
+
+def read_events(client, job, last_id=None):
+    headers = {"Last-Event-ID": str(last_id)} if last_id is not None else {}
+    resp = client.get(f"/api/solve/{job}/events", headers=headers)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    events, ids = [], []
+    for block in resp.text.split("\n\n"):
+        lines = [x for x in block.splitlines() if x and not x.startswith(":")]
+        if not lines:
+            continue
+        fields = dict(x.split(": ", 1) for x in lines)
+        ids.append(int(fields["id"]))
+        events.append(json.loads(fields["data"]))
+    return events, ids
+
+
+def test_solve_streams_and_saves_run(solver, store):
+    pid = add(solver)
+    resp = solver.post(f"/api/puzzles/{pid}/solve", json={"mode": "model", "letters": []})
+    assert resp.status_code == 201
+    job = resp.json()["job"]
+    assert wait_job(solver, job) == "done"
+    events, ids = read_events(solver, job)
+    assert ids == list(range(1, len(events) + 1))
+    types = [e["type"] for e in events]
+    assert types[0] == "stage" and "fill" in types and types[-1] == "done"
+    assert all(e["mode"] == "model" for e in events)
+    run = solver.get(f"/api/puzzles/{pid}/runs").json()["runs"]["model"]
+    assert run["status"] == "done"
+    assert run["accuracy"]["letters_correct"] == run["accuracy"]["letters_total"]
+    assert run["seconds"] is not None and run["rounds"] >= 1
+    assert "log" not in run
+    log = json.loads((store.root / "logs" / f"{pid}-model.json").read_text())
+    assert log["slots"]["1-across"]["truth"] == "MEW"
+    assert "log" not in store.load_runs(pid)["model"]  # the log is its own file
+
+
+def test_events_replay_and_resume(solver):
+    pid = add(solver)
+    job = solver.post(f"/api/puzzles/{pid}/solve", json={"mode": "model"}).json()["job"]
+    wait_job(solver, job)
+    full, _ = read_events(solver, job)
+    again, _ = read_events(solver, job)
+    assert again == full  # a late client gets the whole run
+    tail, ids = read_events(solver, job, last_id=2)
+    assert tail == full[2:] and ids[0] == 3
+
+
+def test_fixed_letters_stay_out_of_the_run(solver):
+    pid = add(solver)
+    letters = [[1, 0, "X"], [2, 2, "r"]]
+    job = solver.post(
+        f"/api/puzzles/{pid}/solve", json={"mode": "model", "letters": letters}
+    ).json()["job"]
+    wait_job(solver, job)
+    fill = solver.get(f"/api/puzzles/{pid}/runs").json()["runs"]["model"]["fill"]
+    cells = {(f["r"], f["c"]) for f in fill}
+    assert (1, 0) not in cells and (2, 2) not in cells
+    assert len(cells) == len(load(MINI).open_cells()) - 2
+
+
+def test_second_solve_is_409_and_cancel(store):
+    checks = {"cluedb": lambda: (True, None), "ollama": lambda: (True, None)}
+    app = create_app(store, health_checks=checks, jobs=fake_jobs(store, delay=5.0))
+    with TestClient(app) as client:
+        pid = add(client)
+        other = add(client, FIXTURES / "midi_7x7.json")
+        job = client.post(f"/api/puzzles/{pid}/solve", json={"mode": "model"}).json()["job"]
+        same = client.post(f"/api/puzzles/{pid}/solve", json={"mode": "lookup"})
+        assert same.status_code == 409
+        assert same.json()["detail"] == "A solve is already running on this puzzle."
+        busy = client.post(f"/api/puzzles/{other}/solve", json={"mode": "model"})
+        assert busy.status_code == 409
+        assert busy.json()["detail"] == "A solve is already running on another puzzle."
+        assert client.get("/api/health").json()["running"]["job"] == job
+        resp = client.post(f"/api/solve/{job}/cancel")
+        assert resp.status_code == 200
+        assert wait_job(client, job) == "cancelled"
+        events, _ = read_events(client, job)
+        assert events[-1]["type"] == "done" and events[-1]["cancelled"] is True
+        assert events[-1]["total"] == len(load(MINI).slots)
+        # The slot is free again.
+        resp = client.post(f"/api/puzzles/{other}/solve", json={"mode": "model"})
+        assert resp.status_code == 201
+        client.post(f"/api/solve/{resp.json()['job']}/cancel")
+        wait_job(client, resp.json()["job"])
+
+
+def test_solve_refusals(client, solver):
+    pid = add(client)
+    # Ollama is off in `client`: model mode is unavailable.
+    resp = client.post(f"/api/puzzles/{pid}/solve", json={"mode": "model"})
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Ollama is off"
+    pid = add(solver)
+    assert solver.post(f"/api/puzzles/{pid}/solve", json={"mode": "lookup"}).status_code == 503
+    assert solver.post(f"/api/puzzles/{pid}/solve", json={"mode": "guess"}).status_code == 422
+    assert solver.post("/api/puzzles/nope-12345678/solve", json={}).status_code == 404
+    assert solver.get("/api/solve/nojob/events").status_code == 404
+    assert solver.post("/api/solve/nojob/cancel").status_code == 404
+
+
+def test_rebus_puzzle_refused(solver):
+    import dataclasses
+
+    from crossword.formats import dumps as dump_bytes
+
+    puzzle = dataclasses.replace(load(MINI), rebus={(1, 0): "HE"})
+    resp = solver.post("/api/puzzles?filename=r.json", content=dump_bytes(puzzle, "native"))
+    pid = resp.json()["id"]
+    resp = solver.post(f"/api/puzzles/{pid}/solve", json={"mode": "model"})
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == REBUS_MESSAGE
+
+
+def test_candidates_route(solver, store):
+    pid = add(solver)
+    resp = solver.get(f"/api/puzzles/{pid}/candidates?slot=1-across&mode=model")
+    assert resp.status_code == 200
+    body = resp.json()
+    answers = [c["answer"] for c in body["candidates"]]
+    assert "MEW" in answers
+    assert all({"answer", "confidence", "source"} <= set(c) for c in body["candidates"])
+    # With letters known, only fitting answers come back.
+    resp = solver.get(f"/api/puzzles/{pid}/candidates?slot=1-across&mode=model&pattern=M..")
+    assert all(c["answer"].startswith("M") for c in resp.json()["candidates"])
+    assert resp.json()["candidates"][0]["answer"] == "MEW"
+    # Saved progress is the default pattern.
+    store.save_progress(pid, {(0, 1): "M"})
+    assert solver.get(
+        f"/api/puzzles/{pid}/candidates?slot=1-across&mode=model"
+    ).json()["pattern"] == "M.."
+    bad = solver.get(f"/api/puzzles/{pid}/candidates?slot=99-down&mode=model")
+    assert bad.status_code == 404
+    assert solver.get(f"/api/puzzles/{pid}/candidates?slot=1-across&mode=x").status_code == 422
+    short = solver.get(f"/api/puzzles/{pid}/candidates?slot=1-across&pattern=M")
+    assert short.status_code == 422
+
+
+def test_ollama_check_wants_the_model(monkeypatch):
+    class Resp:
+        status_code = 200
+
+        def __init__(self, names):
+            self.names = names
+
+        def json(self):
+            return {"models": [{"name": n} for n in self.names]}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: Resp(["llama3:8b"]))
+    ok, reason = check_ollama(model="qwen2.5:7b")()
+    assert not ok and "ollama pull qwen2.5:7b" in reason
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: Resp(["qwen2.5:7b"]))
+    assert check_ollama(model="qwen2.5:7b")() == (True, None)
 
 
 # --------------------------------------------------------------------- static
