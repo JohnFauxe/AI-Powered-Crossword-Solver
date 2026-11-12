@@ -99,6 +99,9 @@ class SearchInput:
         used only for slots none of whose own candidates fit the crossings.
     fixed: letters that must appear in the fill (user entries the solve was
         told to respect), uppercase A-Z.
+    miss_rates: slot id -> that slot's own ``miss_rate``, overriding
+        ``options.miss_rate`` (e.g. lower for a slot re-queried with letters
+        known, where the list is far more likely to hold the answer).
     """
 
     slots: Sequence[SearchSlot]
@@ -106,6 +109,7 @@ class SearchInput:
     fixed: Mapping[Cell, str] = field(default_factory=dict)
     fallback: Mapping[int, Sequence[Candidate]] = field(default_factory=dict)
     options: SearchOptions = field(default_factory=SearchOptions)
+    miss_rates: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -299,12 +303,15 @@ class _Solver:
         # ---- per-slot priors
         self.own: list[dict[str, tuple[float, str]]] = []  # word -> (log prior, source)
         self.own_scaled: list[np.ndarray] = []  # own scores / temperature, dict order
-        self.log_keep = math.log(1 - miss)
+        self.log_keep: list[float] = []  # per slot: log(1 - miss_rate)
         self.fb_mass: list[float] = []  # log mass of the fallback component
         self.oov_mass: list[float] = []  # log mass of the unlisted component
         for si, s in enumerate(problem.slots):
             length = len(self.slot_cells[si])
             pattern = [self.fixed.get(c) for c in self.slot_cells[si]]
+            m = problem.miss_rates.get(s.id, miss)
+            m = min(max(float(m), 1e-6), 1 - 1e-6) if math.isfinite(m) else miss
+            self.log_keep.append(math.log(1 - m))
             best = {}
             for cand in problem.candidates.get(s.id, ()) or ():
                 a = _clean(cand.answer)
@@ -317,12 +324,12 @@ class _Solver:
             has_fb = length in self.fb
             if best:
                 sc = np.array([v[0] for v in best.values()]) / temp
-                lp = sc - float(_logsumexp(sc)) + math.log(1 - miss)
+                lp = sc - float(_logsumexp(sc)) + math.log(1 - m)
                 self.own_scaled.append(sc)
                 self.own.append(
                     {w: (float(p), v[1]) for (w, v), p in zip(best.items(), lp, strict=True)}
                 )
-                rest = miss
+                rest = m
             else:
                 self.own.append({})
                 self.own_scaled.append(np.zeros(0))
@@ -566,7 +573,7 @@ class _Solver:
             dom_lp = []
             for si, sc in enumerate(self.own_scaled):
                 own = sc / flatten
-                own = own - float(_logsumexp(own)) + self.log_keep if len(own) else own
+                own = own - float(_logsumexp(own)) + self.log_keep[si] if len(own) else own
                 dom_lp.append(np.concatenate([own, self.dom_lp[si][len(own) :]]))
         if use_fallback:
             dom_idx = [np.arange(len(w)) for w in dom_words]  # live entries after pruning

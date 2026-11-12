@@ -60,7 +60,7 @@ DEFAULT_MODEL = "qwen2.5:7b"
 DEFAULT_URL = "http://localhost:11434"
 
 # Fields of OllamaConfig that do not change what the model returns.
-_NON_SEMANTIC = {"base_url", "concurrency", "timeout", "keep_alive"}
+_NON_SEMANTIC = {"base_url", "concurrency", "timeout", "keep_alive", "free_pass"}
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,10 @@ class OllamaConfig:
     # had the wrong length (with their letter counts) and asks for more.
     length_feedback: bool = False
     max_choices: int = 150
+    # Free generation alongside the vocab pass. False: when the vocab pass has
+    # choices, ask only for the multiple choice (the engine's re-query uses this).
+    # Does not change any one request, so it is not part of the cache key.
+    free_pass: bool = True
     num_ctx: int = 2048
     seed: int = 0
     concurrency: int = 2
@@ -470,11 +474,13 @@ class OllamaSource:
         """The model's raw answer lists, one per sample (for logging/eval)."""
         pattern = _clean_pattern(pattern, length)
         examples = self.examples(clue, length)
-        jobs = [
-            self._sample(clue, length, pattern, s, examples)
-            for s in range(max(1, self.config.samples))
-        ]
         choices = self.choices(length, pattern)
+        jobs = []
+        if self.config.free_pass or not choices:
+            jobs = [
+                self._sample(clue, length, pattern, s, examples)
+                for s in range(max(1, self.config.samples))
+            ]
         if choices:
             jobs.append(self._sample(clue, length, pattern, 0, examples, choices))
         lists = list(await asyncio.gather(*jobs))
