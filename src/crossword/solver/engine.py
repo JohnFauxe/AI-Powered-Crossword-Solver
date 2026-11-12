@@ -7,16 +7,22 @@ The loop (``model`` mode; ``lookup`` adds the clue DB at every step):
    ~0.3 with qwen2.5:7b, so these lists get a high miss rate.
 2. **Search** (BP + hill-climbing, :mod:`crossword.solver.search`) over the
    merged lists, with the whole word list as fallback.
-3. **Refine rounds** (bounded): letters the search is confident about
-   (cell confidence >= ``letter_conf``) and the user's letters form a
-   pattern for every slot that is not settled. Those slots are re-asked
-   with the **vocab pass** (multiple choice over word-list words fitting the
-   pattern, optionally with leak-free few-shot examples), which has a far
-   higher recall (0.7-0.9), so its lists get a lower miss rate. Then the
-   **verify** step asks the model yes/no for each weak slot's current answer
-   and its best alternatives, and folds P(yes) into the scores. Search
-   again. Stop when no slot changes, nothing is left to re-ask, the round
-   limit or the time budget is reached.
+3. **Refine rounds** (bounded): a slot's *pattern* is its user letters plus
+   the search letters (cell confidence >= ``letter_conf``) whose crossing
+   slot is trusted: its answer came from a list that read the clue (model,
+   vocab pass, clue DB) with slot confidence >= ``trust_conf``. Taking letters
+   only from crossers matters: the search's cell confidences are badly
+   overconfident on real puzzles, and re-asking a slot with letters its own
+   wrong guess put there just returns the same guess. Unsettled slots whose
+   pattern changed are re-asked with the **vocab pass** (multiple choice over
+   vocabulary words fitting the pattern; when more fit than ``max_choices``,
+   the ones agreeing with the current fill and the model's earlier guesses
+   come first). A vocab list's miss rate follows how many words fit the
+   pattern (the model finds the answer among a few dozen choices, rarely among
+   hundreds). Search, then **verify** each weak slot's answer and its best
+   alternatives (real words only) and fold logit P(yes) into the scores, then
+   search again. Stop when nothing changes, nothing is left to re-ask, or at
+   the round limit or time budget.
 
 Every slot's candidate lists, verify results, the rank of the true answer
 (when the puzzle has a solution) and the final choice go into a per-slot log
@@ -69,6 +75,7 @@ SRC_MODEL = "ollama"  # free generation
 SRC_VOCAB = "ollama-vocab"  # multiple choice over the word list, given a pattern
 SRC_CLUEDB = "cluedb"
 SRC_VERIFY = "verify"  # an answer only the verify step vouched for
+LISTED = (SRC_MODEL, SRC_VOCAB, SRC_CLUEDB)  # sources that read the clue
 
 
 # ---------------------------------------------------------------------- config
@@ -90,12 +97,17 @@ class EngineConfig:
     first_fewshot: int = 0  # examples in the first pass (only useful with fewshot="any")
     # Re-query (technique 3) with the vocab pass.
     requery: bool = True
-    rounds: int = 3
+    rounds: int = 6
     fewshot: FewshotMode = "other_length"  # technique 5; "any" leaks answers
     fewshot_k: int = 10
     requery_free: bool = False  # also free generation with the pattern (recall ~0.33)
     max_choices: int = 150
-    letter_conf: float = 0.8  # cells at least this confident give pattern letters
+    letter_conf: float = 0.6  # cells at least this confident give pattern letters
+    # "cell": a confident cell is known. "crosser": also needs the crossing slot's
+    # answer to come from a model list with confidence >= trust_conf, so a slot is
+    # never re-asked with letters only its own (possibly wrong) guess put there.
+    pattern_rule: Literal["cell", "crosser"] = "crosser"
+    trust_conf: float = 0.5
     settle_conf: float = 0.9  # a slot this confident (and not rejected) is not re-asked
     min_known: float = 0.2  # share of a slot's letters known before re-asking it
     max_requery: int = 0  # slots re-asked per round, weakest first; 0 = all
@@ -115,14 +127,23 @@ class EngineConfig:
     # Per-slot miss rate: share of slots whose list lacks the answer (measured recall).
     miss_first: float = 0.68
     miss_cluedb: float = 0.15
-    # Vocab pass miss rate by share of letters known (interpolated).
-    miss_vocab: tuple[tuple[float, float], ...] = (
-        (0.0, 0.7),
-        (0.2, 0.5),
-        (0.4, 0.25),
-        (0.6, 0.1),
-        (1.0, 0.05),
+    # Vocab pass recall by how many vocabulary words fit the pattern (log-interpolated):
+    # measured on uc: the model finds the answer among a few dozen choices, rarely
+    # among hundreds. Miss rate = 1 - (1 - pattern_risk) * recall.
+    vocab_recall: tuple[tuple[float, float], ...] = (
+        (1, 0.9),
+        (20, 0.8),
+        (60, 0.6),
+        (150, 0.4),
+        (500, 0.25),
+        (3000, 0.12),
     )
+    pattern_risk: float = 0.2  # chance a pattern built from search letters is wrong
+    # Order of the multiple-choice words when more fit than max_choices:
+    # log1p(frequency) + soft_weight per unknown letter agreeing with the current
+    # fill + guess_bonus for an answer the model gave before. 0, 0 = by frequency.
+    soft_weight: float = 1.5
+    guess_bonus: float = 6.0
     miss_verified: float = 0.1  # a slot with an accepted answer
     fallback_share: float = 0.5
     consensus: float = 0.9
@@ -131,7 +152,7 @@ class EngineConfig:
     search_per_cell: float = 0.02
     search_min: float = 2.0
     search_max: float = 8.0
-    time_budget: float = 900.0  # whole solve, seconds; refine rounds stop past it
+    time_budget: float = 600.0  # whole solve, seconds; refine rounds stop past it
     seed: int = 0
     # Clue DB exclusion filters (eval); apply to lookup, few-shot and vocabulary.
     exclude_after: str | None = None
@@ -176,7 +197,11 @@ class ModelSource(Protocol):
     name: str
 
     async def acandidates(
-        self, clue: str, length: int, pattern: str | None = None
+        self,
+        clue: str,
+        length: int,
+        pattern: str | None = None,
+        choices: Sequence[str] | None = None,
     ) -> list[Candidate]: ...
 
     async def averify(self, clue: str, answer: str) -> float: ...
@@ -186,6 +211,10 @@ class Vocabulary(Protocol):
     """What the engine needs from the word list (``WordList`` fits)."""
 
     def fallback(self, lengths: Sequence[int], cap: int = 5000) -> dict[int, list[Candidate]]: ...
+
+    def match(
+        self, length: int, pattern: str | None = None, limit: int | None = None
+    ) -> list[tuple[str, int]]: ...
 
 
 class LookupSource(Protocol):
@@ -346,6 +375,8 @@ class SlotState:
     lists: dict[str, list[Candidate]] = field(default_factory=dict)  # current, per source
     first: list[Candidate] = field(default_factory=list)  # merged first-pass list
     known: float = 0.0  # share of letters known at the last re-query
+    vocab_n: int = 0  # vocabulary words fitting the last re-query's pattern
+    pattern_fixed: bool = False  # the last pattern held only the user's letters
     last_pattern: str | None = None
     verified: dict[str, float] = field(default_factory=dict)
     log: list[dict[str, Any]] = field(default_factory=list)  # per query/round entries
@@ -412,6 +443,10 @@ class Engine:
                 SlotState(s.id, clue.text if clue else "", tuple(s.cells), truth or None)
             )
         self.by_id = {s.id: s for s in self.slots}
+        self.crossers: dict[Cell, list[SlotState]] = {}
+        for st in self.slots:
+            for cell in st.cells:
+                self.crossers.setdefault(cell, []).append(st)
         self.search_slots = [SearchSlot(s.id, s.cells) for s in self.slots]
         self.open_cells = len({c for s in self.slots for c in s.cells})
         self.started = 0.0
@@ -420,6 +455,7 @@ class Engine:
         self.result = EngineResult([], {}, 0.0, 0, "running")
         self._fallback: dict[int, list[Candidate]] | None = None
         self.timings: dict[str, float] = {"candidates": 0.0, "search": 0.0, "verify": 0.0}
+        self.history: list[dict[str, Any]] = []  # per search: snapshot (log only)
 
     # -------------------------------------------------------------- helpers
 
@@ -435,13 +471,25 @@ class Engine:
 
     def pattern(self, slot: SlotState, letters: Mapping[Cell, tuple[str, float]]) -> str | None:
         """Known letters of a slot: fixed ones and confident search cells."""
+        cfg = self.config
         out = []
         for cell in slot.cells:
             if cell in self.fixed:
                 out.append(self.fixed[cell])
                 continue
             got = letters.get(cell)
-            out.append(got[0] if got and got[1] >= self.config.letter_conf else ".")
+            ok = bool(got and got[1] >= cfg.letter_conf)
+            if ok and cfg.pattern_rule == "crosser":
+                ok = False
+                for other in self.crossers.get(cell, ()):
+                    if other is slot:
+                        continue
+                    ok = (
+                        other.answer is not None
+                        and other.source in LISTED
+                        and other.confidence >= cfg.trust_conf
+                    )
+            out.append(got[0] if ok and got else ".")
         pat = "".join(out)
         return pat if any(ch != "." for ch in pat) else None
 
@@ -475,7 +523,7 @@ class Engine:
             if s.lists.get(SRC_MODEL):
                 rates.append(cfg.miss_first)
             if s.lists.get(SRC_VOCAB):
-                rates.append(interp(cfg.miss_vocab, s.known))
+                rates.append(self.vocab_miss(s))
             if s.lists.get(SRC_CLUEDB):
                 rates.append(cfg.miss_cluedb)
             if any(p > cfg.verify_threshold for p in s.verified.values()):
@@ -485,6 +533,19 @@ class Engine:
                 miss *= 0.8
             misses[s.id] = miss
         return cands, misses
+
+    def vocab_miss(self, s: SlotState) -> float:
+        cfg = self.config
+        n = max(1, s.vocab_n)
+        table = [(math.log(x), y) for x, y in cfg.vocab_recall]
+        recall = interp(table, math.log(n))
+        risk = 0.0 if s.pattern_fixed else cfg.pattern_risk
+        return 1.0 - (1.0 - risk) * recall
+
+    async def count_matches(self, s: SlotState, pattern: str) -> int:
+        cap = 5000
+        found = await asyncio.to_thread(self.sources.wordlist.match, s.length, pattern, cap)
+        return len(found)
 
     async def run_search(self) -> SearchResult:
         cfg = self.config
@@ -541,7 +602,21 @@ class Engine:
             s.answer, s.confidence, s.source = sf.answer, sf.confidence, sf.source
         self.rounds_done = round_no
         self.update_result("running")
+        self.history.append(self._snapshot(res, round_no))
         return out
+
+    def _snapshot(self, res: SearchResult, round_no: int) -> dict[str, Any]:
+        snap: dict[str, Any] = {
+            "round": round_no,
+            "t": round(self.elapsed(), 1),
+            "slots": {
+                s.id: [s.answer, round(s.confidence, 3), s.source] for s in self.slots
+            },
+            "cells": [[r, c, f.letter, round(f.confidence, 3)] for (r, c), f in res.cells.items()],
+        }
+        letters = {cell: f.letter for cell, f in res.cells.items()}
+        snap["accuracy"] = accuracy(self.puzzle, letters)
+        return snap
 
     def update_result(self, status: str, message: str | None = None) -> None:
         res = self.last
@@ -599,6 +674,8 @@ class Engine:
         if pattern:
             s.known = sum(ch != "." for ch in pattern) / s.length
             s.last_pattern = pattern
+            s.pattern_fixed = True
+            s.vocab_n = await self.count_matches(s, pattern)
         mixed = merge(s.lists, cfg.weights, cfg.temps)
         s.first = [
             Candidate(a, math.log(p), src)
@@ -607,11 +684,48 @@ class Engine:
         s.log.append(entry)
         return s
 
-    async def _ask_again(self, s: SlotState, pattern: str, round_no: int) -> SlotState:
+    def order_choices(
+        self,
+        s: SlotState,
+        pattern: str,
+        words: Sequence[tuple[str, int]],
+        soft: Mapping[Cell, str],
+    ) -> list[str] | None:
+        """Multiple-choice words for a re-query, best first (None: by frequency)."""
+        cfg = self.config
+        if len(words) <= cfg.max_choices or (cfg.soft_weight <= 0 and cfg.guess_bonus <= 0):
+            return None
+        guesses = {c.answer for lst in s.lists.values() for c in lst}
+        unknown = [
+            (i, soft[cell])
+            for i, cell in enumerate(s.cells)
+            if pattern[i] == "." and cell in soft
+        ]
+
+        def score(item: tuple[str, int]) -> float:
+            w, f = item
+            agree = sum(1 for i, ch in unknown if w[i] == ch)
+            return (
+                math.log1p(f)
+                + cfg.soft_weight * agree
+                + (cfg.guess_bonus if w in guesses else 0.0)
+            )
+
+        ranked = sorted(words, key=score, reverse=True)
+        return [w for w, _ in ranked[: cfg.max_choices]]
+
+    async def _ask_again(
+        self, s: SlotState, pattern: str, round_no: int, soft: Mapping[Cell, str] | None = None
+    ) -> SlotState:
         cfg = self.config
         entry: dict[str, Any] = {"round": round_no, "pattern": pattern}
+        words = await asyncio.to_thread(self.sources.wordlist.match, s.length, pattern, 5000)
+        s.vocab_n = len(words)
         if self.sources.requery is not None:
-            cands = await self.sources.requery.acandidates(s.clue, s.length, pattern)
+            choices = self.order_choices(s, pattern, words, soft or {})
+            cands = await self.sources.requery.acandidates(
+                s.clue, s.length, pattern, choices=choices
+            )
             # A re-query with more letters supersedes the earlier one; answers from
             # it that still fit are kept so a good guess is not lost to a near miss.
             keep = [c for c in s.lists.get(SRC_VOCAB, []) if matches(c.answer, s.length, pattern)]
@@ -629,12 +743,21 @@ class Engine:
             entry[SRC_CLUEDB] = self._log_list(s, list(found))
         s.known = sum(ch != "." for ch in pattern) / s.length
         s.last_pattern = pattern
+        s.pattern_fixed = pattern == self.fixed_pattern(s)
+        entry["matches"] = s.vocab_n
         s.log.append(entry)
         return s
 
     def _log_list(self, s: SlotState, cands: Sequence[Candidate]) -> dict[str, Any]:
         answers = [c.answer for c in cands]
         return {"top": answers[:20], "n": len(answers), "rank": rank_of(s.truth, answers)}
+
+    def is_word(self, s: SlotState, answer: str) -> bool:
+        """In a candidate list or the vocabulary (verify only judges real words:
+        it says yes to strings the crossings spelled that mean nothing)."""
+        if any(c.answer == answer for lst in s.lists.values() for c in lst):
+            return True
+        return bool(self.sources.wordlist.match(s.length, answer, 1))
 
     async def _verify(self, round_no: int) -> int:
         """Verify each weak slot's answer and its best fitting alternatives."""
@@ -648,11 +771,11 @@ class Engine:
         for s in self.slots:
             if all(c in self.fixed for c in s.cells):
                 continue
-            if s.answer is not None and s.confidence >= cfg.settle_conf:
+            if self.settled(s):
                 continue
             want: list[str] = []
             current = "".join(letters.get(c, ("?", 0))[0] for c in s.cells)
-            if current.isalpha() and len(current) == s.length:
+            if current.isalpha() and len(current) == s.length and self.is_word(s, current):
                 want.append(current)
             pattern = self.pattern(s, letters)
             alts = sorted(cands.get(s.id, []), key=lambda c: -c.score)
@@ -676,7 +799,6 @@ class Engine:
 
     async def run(self) -> AsyncIterator[dict[str, Any]]:
         self.started = self.clock()
-        cfg = self.config
         try:
             if not self.puzzle.solver_supported:
                 self.update_result("error", REBUS_MESSAGE)
@@ -700,8 +822,6 @@ class Engine:
         except Exception as e:  # noqa: BLE001 - reported as an event, never raised
             self.update_result("error", str(e) or type(e).__name__)
             yield self.ev(type="error", message=str(e) or type(e).__name__)
-        finally:
-            del cfg
 
     async def _run(self) -> AsyncIterator[dict[str, Any]]:
         cfg = self.config
@@ -756,7 +876,8 @@ class Engine:
                 type="stage", name="refine", round=r, rounds=cfg.rounds, done=0, total=len(todo)
             )
             t0 = self.clock()
-            jobs = [asyncio.ensure_future(self._ask_again(s, p, r)) for s, p in todo]
+            soft = {cell: f.letter for cell, f in res.cells.items()}
+            jobs = [asyncio.ensure_future(self._ask_again(s, p, r, soft)) for s, p in todo]
             n = 0
             try:
                 for fut in asyncio.as_completed(jobs):
@@ -800,6 +921,13 @@ class Engine:
             if all(before[s.id] == s.answer for s in self.slots) and not todo:
                 break
 
+    def settled(self, s: SlotState) -> bool:
+        """Confident, from a source that read the clue, and not rejected by verify."""
+        cfg = self.config
+        if s.answer is None or s.source not in LISTED or s.confidence < cfg.settle_conf:
+            return False
+        return s.verified.get(s.answer, 1.0) >= cfg.verify_threshold
+
     def _requery_targets(
         self, letters: Mapping[Cell, tuple[str, float]]
     ) -> list[tuple[SlotState, str]]:
@@ -808,8 +936,7 @@ class Engine:
         for s in self.slots:
             if all(c in self.fixed for c in s.cells):
                 continue
-            rejected = s.answer is not None and s.verified.get(s.answer, 1.0) < cfg.verify_threshold
-            if s.answer is not None and s.confidence >= cfg.settle_conf and not rejected:
+            if self.settled(s):
                 continue
             pattern = self.pattern(s, letters)
             if pattern is None or pattern == s.last_pattern:
@@ -870,7 +997,11 @@ class Engine:
                 "changed_round": s.changed_round,
                 "steps": s.log,
             }
-        return {"slots": slots, "timings": {k: round(v, 2) for k, v in self.timings.items()}}
+        return {
+            "slots": slots,
+            "timings": {k: round(v, 2) for k, v in self.timings.items()},
+            "history": self.history,
+        }
 
 
 # -------------------------------------------------------------------- scoring

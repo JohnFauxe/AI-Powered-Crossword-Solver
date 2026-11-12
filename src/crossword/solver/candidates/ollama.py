@@ -470,11 +470,24 @@ class OllamaSource:
         self.cache.put(key, "cand", cfg.model, clue, answers)
         return answers
 
-    async def araw(self, clue: str, length: int, pattern: str | None) -> list[list[str]]:
-        """The model's raw answer lists, one per sample (for logging/eval)."""
+    async def araw(
+        self,
+        clue: str,
+        length: int,
+        pattern: str | None,
+        choices: Sequence[str] | None = None,
+    ) -> list[list[str]]:
+        """The model's raw answer lists, one per sample (for logging/eval).
+        ``choices``: the multiple-choice words to offer, instead of the most
+        frequent vocabulary words fitting ``pattern`` (the engine orders them by
+        agreement with the grid)."""
         pattern = _clean_pattern(pattern, length)
-        examples = self.examples(clue, length)
-        choices = self.choices(length, pattern)
+        examples = await asyncio.to_thread(self.examples, clue, length)
+        if choices is not None and self.config.vocab_pass and pattern:
+            choices = [c for c in choices if matches(c, length, pattern)][: self.config.max_choices]
+            choices = choices or None
+        else:
+            choices = self.choices(length, pattern)
         jobs = []
         if self.config.free_pass or not choices:
             jobs = [
@@ -526,14 +539,18 @@ class OllamaSource:
         return answers
 
     async def acandidates(
-        self, clue: str, length: int, pattern: str | None = None
+        self,
+        clue: str,
+        length: int,
+        pattern: str | None = None,
+        choices: Sequence[str] | None = None,
     ) -> list[Candidate]:
         """Ranked candidates; ``[]`` if Ollama fails (never raises for HTTP errors)."""
         if length < 1 or (pattern is not None and len(pattern) != length):
             return []
         pattern = _clean_pattern(pattern, length)
         try:
-            lists = await self.araw(clue, length, pattern)
+            lists = await self.araw(clue, length, pattern, choices)
         except (httpx.HTTPError, ValueError):
             return []
         return combine_samples(lists, length, pattern, self.name)
