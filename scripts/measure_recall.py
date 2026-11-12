@@ -63,6 +63,8 @@ SETTINGS = {
         _o("aware_noforce", clue_aware=True, force_n=False, **FREE),
         _o("aware_len", clue_aware=True, constrain="length"),
         _o("aware_think", clue_aware=True, think=True, **FREE),
+        # the model's own thinking mode (qwen3 and similar), first pass only
+        _o("aware_reason", clue_aware=True, reasoning=True, **FREE),
         _o("aware_n20", clue_aware=True, n_answers=20, **FREE),
         _o("aware_fb", clue_aware=True, length_feedback=True, **FREE),
         _o("aware_fb_s3", clue_aware=True, length_feedback=True, samples=3, **FREE),
@@ -101,6 +103,9 @@ SETTINGS = {
 }
 
 
+NUM_GPU: int | None = None  # --num-gpu
+
+
 def reveal_pattern(answer: str, key: str, fraction: float = 0.4, seed: int = 0) -> str:
     rng = random.Random(f"{seed}:{key}")
     k = max(1, round(fraction * len(answer)))
@@ -135,7 +140,7 @@ async def run_ollama(
     concurrency: int,
     vocab: WordList | None = None,
 ) -> list[dict]:
-    cfg = OllamaConfig(model=model, concurrency=concurrency, **setting.config)
+    cfg = OllamaConfig(model=model, concurrency=concurrency, num_gpu=NUM_GPU, **setting.config)
     src = OllamaSource(cfg, fewshot_db=fewshot_db, vocab=vocab)
 
     async def one(item: dict) -> dict:
@@ -159,7 +164,7 @@ async def run_verify(slots: list[dict], model: str, wordlist: WordList) -> dict:
     The distractor is the most frequent vocabulary word that fits the revealed
     pattern and is not the answer (what the word-list fallback would offer).
     """
-    src = OllamaSource(OllamaConfig(model=model, concurrency=4))
+    src = OllamaSource(OllamaConfig(model=model, concurrency=4, num_gpu=NUM_GPU))
     pairs = []
     for it in slots:
         wrong = next(
@@ -225,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--settings", default="cluedb,wordlist_pat,base,aware")
     ap.add_argument("--model", default="qwen2.5:7b")
     ap.add_argument("--concurrency", type=int, default=1)
+    ap.add_argument("--num-gpu", type=int, default=None, help="layers on the GPU (99 = all)")
     ap.add_argument("--reveal", type=float, default=0.4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0, help="first N clues per puzzle (0 = all)")
@@ -232,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--verify", action="store_true", help="also measure verify() separation")
     ap.add_argument("--json", type=Path, default=None, help="write summaries here")
     args = ap.parse_args(argv)
+    global NUM_GPU
+    NUM_GPU = args.num_gpu
     if args.list:
         for s in SETTINGS.values():
             print(f"{s.name:18} {s.source:9} reveal={s.reveal} {s.config}")

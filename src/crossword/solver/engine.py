@@ -91,10 +91,12 @@ class EngineConfig:
     model: str = DEFAULT_MODEL
     ollama_url: str = DEFAULT_URL
     concurrency: int = 4
+    num_gpu: int | None = None  # OllamaConfig.num_gpu: layers on the GPU (None: Ollama's guess)
     # First pass: free generation, no letters known.
     n_answers: int = 10
     samples: int = 1  # technique 2: requests per clue (first greedy, rest sampled)
     first_fewshot: int = 0  # examples in the first pass (only useful with fewshot="any")
+    first_reasoning: bool = False  # the model's own thinking mode in the first pass (qwen3)
     # Re-query (technique 3) with the vocab pass.
     requery: bool = True
     rounds: int = 6
@@ -291,9 +293,11 @@ def build_sources(
         n_answers=config.n_answers,
         constrain="none",
         max_choices=config.max_choices,
+        num_gpu=config.num_gpu,
     )
     first_cfg = base.with_(
         samples=config.samples,
+        reasoning=config.first_reasoning,
         fewshot=config.first_fewshot if config.fewshot != "off" else 0,
         fewshot_mode=fs_mode,
     )

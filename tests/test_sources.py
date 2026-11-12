@@ -317,6 +317,24 @@ def test_ollama_request_shape(tmp_path):
     assert fake.requests[-1]["messages"][0]["content"] == prompts.BASELINE_SYSTEM
 
 
+def test_ollama_thinking_and_num_gpu(tmp_path):
+    fake = FakeOllama({"Feline": [["CAT"]]})
+    src = make_source(fake, tmp_path)
+    src.candidates("Feline", 3, None)
+    src.verify("Feline", "CAT")
+    # thinking models (qwen3) must answer directly: off for answers and verify
+    assert fake.requests[0]["think"] is False and "num_gpu" not in fake.requests[0]["options"]
+    assert fake.requests[1]["think"] is False
+    base_keys = OllamaConfig().cache_options()
+    assert OllamaConfig(num_gpu=99).cache_options() == base_keys  # not semantic
+    src2 = make_source(fake, tmp_path, reasoning=True, num_gpu=99)
+    src2.candidates("Feline", 3, None)
+    body = fake.requests[-1]
+    assert body["think"] is True and body["options"]["num_gpu"] == 99
+    assert body["options"]["num_predict"] > fake.requests[0]["options"]["num_predict"]
+    assert OllamaConfig(reasoning=True).cache_options() != base_keys
+
+
 def test_ollama_cache(tmp_path):
     fake = FakeOllama({"Feline": [["CAT", "TOM"]]})
     src = make_source(fake, tmp_path)

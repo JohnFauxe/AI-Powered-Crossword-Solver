@@ -188,6 +188,55 @@ send the loop into a different basin (±5 letters on a 15×15 across reruns
 during tuning, and more in the samples-3 case). With two puzzles per
 ablation, treat differences under ~5 points as noise.
 
+### Model comparison (partial)
+
+Measured 2026-11-12, same machine. Other programs held ~1.9 GB of the 12 GB
+card, leaving ~10.3 GB. Every model below ran at 100% GPU with `num_ctx`
+2048. `qwen3:14b` needs `--set num_gpu=99` (or `OllamaConfig(num_gpu=99)`):
+Ollama's own estimate put one of its 41 layers on the CPU, though all of
+them fit (10.9 GB used). The default stays `qwen2.5:7b` until all four
+puzzles are measured (below).
+
+Recall screen on uc261111 (78 clues, `scripts/measure_recall.py
+--concurrency 4`). "First pass" is the `aware` setting, with no letters known
+and no few-shot. "Vocab pass" is `aware_vocab_xfs10`, with 40% of letters
+known and few-shot from other answer lengths. Verify compares the true
+answer with the most frequent word-list word that fits the same pattern.
+
+| model | first pass r@1 / 5 / 20 | s/clue | vocab pass r@1 / 5 / 20 | s/clue | verify P(true) / P(wrong) / pairwise | s/check |
+|---|---|---|---|---|---|---|
+| qwen2.5:7b ¹ | .19 / — / .295 | 0.85 | .54 / — / .769 | 1.9 | .713 / .076 / .859 | 0.03 |
+| qwen3:14b (`think=false`) | .333 / .436 / .436 | 1.58 | .615 / .756 / .808 | 3.43 | .806 / .087 / .936 | 0.07 |
+| **gemma3:12b** | .321 / .487 / .487 | 1.38 | .654 / .821 / .833 | 3.38 | .825 / .243 / .872 | 0.14 |
+| phi4:14b | .282 / .397 / .397 | 1.74 | .590 / .782 / .808 | 4.43 | .805 / .180 / .859 | 0.06 |
+
+¹ From `docs/m4-candidates.md` (same scripts and hardware, measured earlier
+the same day), not re-run.
+
+Full solve, model mode, `crossword eval --model gemma3:12b --label
+gemma3-12b` with the default engine settings (nothing re-tuned). **Partial:**
+only uc and wsj were run. ucs and wp (21×21) and qwen3:14b were not measured.
+
+| puzzle | qwen2.5:7b letters / words / time | gemma3:12b letters / words / time |
+|---|---|---|
+| uc261111 | 75.0% / 56.4% / n/m | **86.4% / 70.5%** / 271 s ² |
+| wsj261111 | 47.6% / 33.3% / 218 s | **79.7% / 61.5%** / 275 s |
+| ucs261108 | 51.0% / 36.1% / 376 s | not run |
+| wp261108 | 57.6% / 41.0% / 393 s | not run |
+| mean (uc + wsj) | 61.3% / 44.9% | **83.1% / 66.0%** |
+
+² The first-pass answers were already cached from the recall screen
+(about 108 s of model time). wsj was a cold cache: 1.26× qwen2.5's time.
+
+On the two puzzles measured, gemma3:12b beats qwen2.5:7b by about 21 points
+on letters and on words, far above the ~5-point run-to-run noise, and is
+about 1.3× slower. Its verify lets more wrong answers through (P(wrong) .24
+against .08), but on these runs the loop did not suffer for it. Before making
+it the default, run ucs and wp:
+`crossword eval data/samples/ucs261108.puz --mode model --model gemma3:12b --label gemma3-12b`
+(one puzzle per run). Thinking mode for qwen3 (`--set first_reasoning=true`)
+was not measured.
+
 ### Comparison: lookup mode (held out by date)
 
 | puzzle | letters | words | perfect | recall@1 / 5 / 20 | time |

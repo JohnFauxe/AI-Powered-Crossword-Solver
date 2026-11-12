@@ -60,7 +60,7 @@ DEFAULT_MODEL = "qwen2.5:7b"
 DEFAULT_URL = "http://localhost:11434"
 
 # Fields of OllamaConfig that do not change what the model returns.
-_NON_SEMANTIC = {"base_url", "concurrency", "timeout", "keep_alive", "free_pass"}
+_NON_SEMANTIC = {"base_url", "concurrency", "timeout", "keep_alive", "free_pass", "num_gpu"}
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,12 @@ class OllamaConfig:
     n_answers: int = 10  # technique 2: list length per request
     force_n: bool = True  # schema minItems = n_answers (else the model often stops at 1-3)
     think: bool = False  # a short "thoughts" field before the answers (reasoning first)
+    # The model's own thinking mode (Ollama's request-level ``think``, for models
+    # such as qwen3). Sent as ``think: false`` by default so a thinking model answers
+    # directly: its JSON schema output and verify's first-token log-probabilities
+    # need the answer, not a thinking block. Non-thinking models ignore it.
+    reasoning: bool = False
+    reasoning_tokens: int = 1500  # extra num_predict when reasoning is on
     samples: int = 1  # technique 2: requests per clue (first greedy, rest sampled)
     temperature: float = 0.7  # for samples after the first
     fewshot: int = 0  # technique 5: number of examples (0 = off; needs fewshot_db)
@@ -94,6 +100,10 @@ class OllamaConfig:
     # Does not change any one request, so it is not part of the cache key.
     free_pass: bool = True
     num_ctx: int = 2048
+    # Layers Ollama puts on the GPU (None: its own estimate). Ollama's estimate is
+    # conservative and offloads a layer of a 14B model to the CPU on a 12 GB card
+    # that has room for all of it; 99 means every layer.
+    num_gpu: int | None = None
     seed: int = 0
     concurrency: int = 2
     timeout: float = 120.0
@@ -108,6 +118,9 @@ class OllamaConfig:
             d.pop("length_feedback")
         if not self.vocab_pass:
             d.pop("max_choices")
+        if not self.reasoning:
+            d.pop("reasoning")  # keeps keys of runs made before the option existed
+            d.pop("reasoning_tokens")
         return json.dumps(d, sort_keys=True)
 
     def with_(self, **changes: Any) -> OllamaConfig:
@@ -354,6 +367,8 @@ class OllamaSource:
         return ok
 
     async def _chat(self, body: dict[str, Any]) -> dict[str, Any]:
+        if self.config.num_gpu is not None:
+            body = {**body, "options": {**body.get("options", {}), "num_gpu": self.config.num_gpu}}
         client, sem = self._client()
         async with sem:
             t0 = time.monotonic()
@@ -410,9 +425,13 @@ class OllamaSource:
             if cfg.structured
             else "json"
         )
+        num_predict = n * (max(length, 8) + 8) + (250 if cfg.think else 20)
+        if cfg.reasoning:
+            num_predict += cfg.reasoning_tokens
         return {
             "model": cfg.model,
             "stream": False,
+            "think": cfg.reasoning,
             "format": fmt,
             "keep_alive": cfg.keep_alive,
             "messages": [
@@ -423,7 +442,7 @@ class OllamaSource:
                 "temperature": 0.0 if sample == 0 else cfg.temperature,
                 "seed": cfg.seed + sample,
                 "num_ctx": cfg.num_ctx,
-                "num_predict": n * (max(length, 8) + 8) + (250 if cfg.think else 20),
+                "num_predict": num_predict,
             },
         }
 
@@ -587,6 +606,7 @@ class OllamaSource:
         body = {
             "model": cfg.model,
             "stream": False,
+            "think": False,  # the first token must be the yes/no
             "keep_alive": cfg.keep_alive,
             "logprobs": True,
             "top_logprobs": 10,
