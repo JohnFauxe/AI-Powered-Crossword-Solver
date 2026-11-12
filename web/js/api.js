@@ -63,17 +63,31 @@ export const check = (id, cells, letters) =>
 /** target: {cell: [r, c]} | {slot: "12-down"} | {all: true} */
 export const reveal = (id, target) => request("POST", `/puzzles/${enc(id)}/reveal`, target);
 export const getRuns = (id) => request("GET", `/puzzles/${enc(id)}/runs`);
-export const clearRun = (id, mode) => request("DELETE", `/puzzles/${enc(id)}/runs/${enc(mode)}`);
+/** Drop the (mode, model) run, or every run of the mode without a model. */
+export const clearRun = (id, mode, model) =>
+  request("DELETE", `/puzzles/${enc(id)}/runs/${enc(mode)}` + (model ? `?model=${enc(model)}` : ""));
 export const health = () => request("GET", "/health");
-/** Start a solve job. letters: the user's letters, treated as fixed. Returns {job, ...}. */
-export const solve = (id, mode, letters) =>
-  request("POST", `/puzzles/${enc(id)}/solve`, { mode, letters: lettersToList(letters) });
+export const models = () => request("GET", "/models");
+/** Start a solve job. letters: the user's letters, treated as fixed; models:
+ * names, solved in turn (default: the server's default). Returns {job, models, ...}. */
+export const solve = (id, mode, letters, models) =>
+  request("POST", `/puzzles/${enc(id)}/solve`, { mode, models, letters: lettersToList(letters) });
+export const jobStatus = (job) => request("GET", `/solve/${enc(job)}`);
 export const cancelSolve = (job) => request("POST", `/solve/${enc(job)}/cancel`);
 export const solveEventsUrl = (job) => `/api/solve/${enc(job)}/events`;
 /** pattern: the slot's known letters, "." for unknown, e.g. "C.T" (optional). */
-export const candidates = (id, slot, mode, pattern) =>
+export const candidates = (id, slot, mode, pattern, model) =>
   request(
     "GET",
     `/puzzles/${enc(id)}/candidates?slot=${enc(slot)}&mode=${enc(mode)}` +
-      (pattern ? `&pattern=${enc(pattern)}` : ""),
+      (pattern ? `&pattern=${enc(pattern)}` : "") +
+      (model ? `&model=${enc(model)}` : ""),
   );
+
+// Benchmarks
+export const benchList = () => request("GET", "/bench");
+export const benchPuzzles = () => request("GET", "/bench/puzzles");
+export const benchGet = (id) => request("GET", `/bench/${enc(id)}`);
+export const benchDelete = (id) => request("DELETE", `/bench/${enc(id)}`);
+/** body: {models, modes, puzzles: [ids] | "all", ignore_cache} */
+export const benchStart = (body) => request("POST", "/bench", body);

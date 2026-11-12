@@ -78,8 +78,8 @@ Maximum content width is 1100px, centred.
 ```
 Title, byline, timer                                   [Theme]
 ┌ Solver bar ───────────────────────────────────────────────┐
-│ [Model | Lookup] [Solve]  status          □ disagreements │
-│ ┌ Model run summary ┐  ┌ Lookup run summary ┐             │
+│ [Model | Lookup] [Models ▾] [Solve]  status  [Compare with…]│
+│ ┌ Model · qwen2.5 ┐ ┌ Model · gemma3 ┐ ┌ Lookup · qwen2.5 ┐ │
 └───────────────────────────────────────────────────────────┘
 ┌ Clue bar ─────────┐   ACROSS            DOWN
 │ 6A  Quiver item   │   1 …               1 …
@@ -266,6 +266,85 @@ Short, plain, sentence case. No exclamation marks.
 | Rebus puzzle | "This puzzle has multi-letter squares. The solver can't fill it yet." |
 | Save failed | "Couldn't save progress. Retrying." |
 | Empty puzzle list | "No puzzles yet. Drop a .puz file here to start." |
+
+## Models and benchmarks
+
+Added with multi-model support. Same tokens, type and shapes as above; no
+new colours except where noted.
+
+### Model picker (solver bar)
+
+- A button after the mode toggle showing the chosen model's name, or
+  "3 models". It opens a popover (focus-trapped like Suggest) with one
+  checkbox row per installed model: name in bold, a "default" tag, and a
+  muted line with size, parameters and quantisation. Rows for models that
+  can't solve (embedding, vision-only) are greyed and disabled, with the
+  reason in `--warn` under the name; a model larger than the GPU says "May
+  not fit in GPU memory" but stays selectable.
+- At least one model stays selected. The choice is stored in
+  `localStorage` (`xw:models`). Models solve in the list's order (default
+  first), one after another, each with the GPU to itself.
+- The popover is shifted left to stay inside the viewport at phone width.
+
+### Runs
+
+- One card per (mode, model) that has a run: mode dot, mode name muted,
+  model name bold; then time and rounds, letters and words correct with
+  percentages, and a note line for "Cancelled", "mostly cached answers" or
+  failed requests. Cards are buttons: clicking one shows that run's letters
+  in the grid. The shown card has an `--ink` border (2px look via an inset
+  ring) and `aria-pressed="true"`.
+- During a multi-model solve, the live model's card reads "Solving…" and the
+  ones still to come read "Queued".
+- Cards wrap in a grid (min 230px) when wide and stack when narrow.
+- The Model/Lookup toggle now only sets what the next Solve does; which run
+  is shown is the card selection. The grid colours letters by the shown
+  run's mode.
+- **Compare with…**: a select listing the other runs. When set, cells where
+  the shown run and the chosen run hold different letters get the `--warn`
+  inset border (the old "modes disagree" mark), and the compared card gets a
+  dashed `--warn` border. It replaces the "Show disagreements" checkbox.
+- Clear ▾ → "Clear the shown run" removes that one run.
+
+### Status while running
+
+| Situation | Text |
+|---|---|
+| Several models | "Model 2 of 3: gemma3:12b · Asking the model: 34 of 78 clues" |
+| No answer for 5 s | "Waiting for the local model (loading or busy)… 12 s" (counts up each second) |
+| Model not loaded, another one resident | "Loading qwen3:14b (qwen2.5:7b is in memory)… 12 s" |
+| Requests failed | A `--warn` line under the bar: "3 model requests failed (HTTP 500); results may be weaker." prefixed with the model when several run |
+
+### Benchmark page (`bench.html`, linked from the puzzle list header)
+
+- Same header, paper and surface panels as the other pages. Three panels:
+  **New benchmark**, **Results**, **Past benchmarks**.
+- The form: fieldsets for Models (same rows as the picker), Modes (Model,
+  Lookup, with their dots), Puzzles ("All puzzles with a solution" plus one
+  checkbox per puzzle with its size) and Timing ("Ignore cache", with a one-
+  line explanation). The status line under it states the run count
+  ("12 runs: 3 models × 2 modes × 2 puzzles."). The primary button becomes
+  Cancel while running; a thin `--ink` progress line runs under the panel.
+- Status while running: "Run 3 of 12: gemma3:12b · Model · Tidy Sum ·
+  Fitting the grid", with the same waiting and warning texts as above.
+- Results table: one row per model and mode (mode dot plus muted mode
+  name), column groups per puzzle (Letters, Words, Time), then Mean letters,
+  Mean words and Total time. Figures use tabular numerals. Column headers
+  are buttons that sort (arrow and `aria-sort`). The best value in each
+  column (highest accuracy, lowest time) is **bold with a 3px `--ok` bar**
+  under it, never colour alone; nothing is marked when every row ties. A
+  superscript "c" marks a time that came mostly from cached answers. The
+  table scrolls sideways inside its box at phone width, with the model
+  column sticky.
+- Chart: inline SVG, horizontal bars, two per row: mean letters in `--focus`
+  and mean words in `--ink` (from the token set; they differ strongly in
+  lightness, so they read apart in both themes and for colour-blind
+  readers), each with its value as a label and a legend below. Bars are
+  square at the baseline and rounded (4px) at the data end; gridlines in
+  `--line`. Hovering a bar gives a native tooltip.
+- Past benchmarks: one row each with date, models, modes, puzzle count and
+  run count, plus Open and Delete (with confirmation). Open shows it in the
+  Results panel and puts `?id=` in the URL.
 
 ## Out of scope for this spec
 

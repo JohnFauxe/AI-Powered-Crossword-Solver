@@ -66,6 +66,7 @@ class Row:
     config: dict[str, Any] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
+    model: str = ""
 
     def as_json(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -121,6 +122,7 @@ def score(engine: Engine, path: Path, label: str, seconds: float) -> Row:
             for h in rec["log"]["history"]
         ],
         timings=rec["log"]["timings"],
+        model=engine.config.model,
     )
 
 
@@ -145,13 +147,27 @@ def run_eval(
     label: str = "default",
     out_dir: Path | None = None,
     progress: Callable[[str], None] | None = None,
+    model_in_name: bool = False,
+    unload: Callable[[str], Any] | None = None,
 ) -> list[Row]:
-    """Solve every puzzle with a solution in every config; one JSON per row."""
-    from crossword.server.jobs import SourcePool
+    """Solve every puzzle with a solution in every config; one JSON per row.
 
+    When the model changes between configs, the previous one is unloaded
+    first (``unload``, default: Ollama ``keep_alive: 0``) so two models never
+    share the GPU. ``model_in_name``: put the model in the row file names."""
+    from crossword.server.jobs import SourcePool, model_slug
+
+    if unload is None:
+        from crossword.solver.models import ModelRegistry
+
+        unload = ModelRegistry().unload
     pool = SourcePool(data_root)
     rows: list[Row] = []
+    prev_model: str | None = None
     for config in configs:
+        if prev_model is not None and config.model != prev_model:
+            unload(prev_model)
+        prev_model = config.model
         for path in files:
             puzzle = load(path)
             if not puzzle.has_solution or not puzzle.solver_supported:
@@ -159,7 +175,7 @@ def run_eval(
                     progress(f"skip {path.name}: no solution or rebus")
                 continue
             if progress:
-                progress(f"{config.mode:6s} {path.name} ...")
+                progress(f"{config.model} {config.mode:6s} {path.name} ...")
             t0 = time.monotonic()
 
             async def go(puzzle: Puzzle = puzzle, config: EngineConfig = config) -> Engine:
@@ -176,7 +192,8 @@ def run_eval(
             rows.append(row)
             if out_dir is not None:
                 out_dir.mkdir(parents=True, exist_ok=True)
-                name = f"eval-{slug(label)}-{config.mode}-{path.stem}.json"
+                mid = f"{model_slug(config.model)}-" if model_in_name else ""
+                name = f"eval-{slug(label)}-{mid}{config.mode}-{path.stem}.json"
                 (out_dir / name).write_text(json.dumps(row.as_json(), indent=1))
             if progress:
                 progress(format_row(row))
@@ -254,6 +271,52 @@ def load_rows(paths: Iterable[str | Path]) -> list[dict[str, Any]]:
         except (OSError, ValueError):
             continue
     return out
+
+
+def row_model(d: Row | dict[str, Any]) -> str:
+    """A row's model (older rows only have it in their config)."""
+    d = d.as_json() if isinstance(d, Row) else d
+    return d.get("model") or (d.get("config") or {}).get("model") or "?"
+
+
+def compare_table(rows: Sequence[Row | dict[str, Any]]) -> str:
+    """Model x puzzle: one line per (model, mode), letters/words per puzzle,
+    then mean letters, mean words and total time. ``*`` marks the best mean."""
+    ds = [r.as_json() if isinstance(r, Row) else r for r in rows]
+    puzzles = sorted({d["puzzle"] for d in ds})
+    groups: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    for d in ds:
+        groups.setdefault((row_model(d), d["mode"]), {})[d["puzzle"]] = d
+    order = {"model": 0, "lookup": 1}
+    keys = sorted(groups, key=lambda k: (order.get(k[1], 2), k[0]))
+    head = f"{'model':24s}{'mode':8s}"
+    for p in puzzles:
+        head += f"{Path(p).stem[:13]:>14s}"
+    head += f"{'mean L':>8s}{'mean W':>8s}{'time':>8s}"
+    sub = " " * 32 + "".join(f"{'letters/words':>14s}" for _ in puzzles)
+    stats = {}
+    for k in keys:
+        items = list(groups[k].values())
+        n = len(items)
+        stats[k] = (
+            sum(d["letters"] for d in items) / n,
+            sum(d["words"] for d in items) / n,
+            sum(d["seconds"] for d in items),
+        )
+    best_l = {m: max(v[0] for k, v in stats.items() if k[1] == m) for m in {k[1] for k in keys}}
+    lines = [head, sub]
+    for k in keys:
+        line = f"{k[0][:23]:24s}{k[1]:8s}"
+        for p in puzzles:
+            d = groups[k].get(p)
+            cell = f"{d['letters']:.0%}/{d['words']:.0%}" if d else "–"
+            line += f"{cell:>14s}"
+        ml, mw, t = stats[k]
+        star = "*" if ml == best_l[k[1]] and len(keys) > 1 else " "
+        line += f"{ml:7.1%}{star}{mw:7.1%} {t:6.0f}s"
+        lines.append(line)
+    lines.append("* best mean letters in its mode")
+    return "\n".join(lines)
 
 
 def make_configs(modes: Sequence[Mode], **changes: Any) -> list[EngineConfig]:

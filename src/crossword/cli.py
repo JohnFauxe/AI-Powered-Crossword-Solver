@@ -78,10 +78,16 @@ def cmd_convert(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
+    from crossword.server import fakes
     from crossword.server.app import create_app
 
+    if fakes.enabled():  # development and UI tests only: no Ollama, no GPU
+        app = fakes.fake_app()
+        print(f"{fakes.ENV_VAR} is set: FAKE models and sources, not Ollama.")
+    else:
+        app = create_app()
     print(f"Serving on http://127.0.0.1:{args.port}/")
-    uvicorn.run(create_app(), host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
 
@@ -92,6 +98,17 @@ def _parse_value(text: str):
         return ast.literal_eval(text)
     except (ValueError, SyntaxError):
         return text
+
+
+def parse_models(args: argparse.Namespace) -> list[str]:
+    """``--model`` values: repeatable and/or comma-separated, de-duplicated."""
+    out: list[str] = []
+    for item in getattr(args, "model", None) or []:
+        for name in str(item).split(","):
+            name = name.strip()
+            if name and name not in out:
+                out.append(name)
+    return out
 
 
 def engine_changes(args: argparse.Namespace) -> dict:
@@ -105,8 +122,9 @@ def engine_changes(args: argparse.Namespace) -> dict:
         ch["fewshot"] = args.fewshot
     if getattr(args, "samples", None):
         ch["samples"] = args.samples
-    if getattr(args, "model", None):
-        ch["model"] = args.model
+    models = parse_models(args)
+    if len(models) == 1:
+        ch["model"] = models[0]
     if getattr(args, "rounds", None) is not None:
         ch["rounds"] = args.rounds
     if getattr(args, "time_budget", None):
@@ -133,7 +151,10 @@ def add_engine_switches(p: argparse.ArgumentParser) -> None:
         "model-mode default) or any (leaks answers; lookup's default)",
     )
     p.add_argument("--samples", type=int, help="first-pass requests per clue (default 1)")
-    p.add_argument("--model", help="Ollama model name (default qwen2.5:7b)")
+    p.add_argument(
+        "--model", action="append", metavar="NAME",
+        help="Ollama model (default qwen2.5:7b); eval takes several (repeat or comma-separate)",
+    )
     p.add_argument("--rounds", type=int, help="refine rounds (default 6)")
     p.add_argument("--time-budget", type=float, help="seconds per solve before rounds stop")
     p.add_argument("--exclude-after", metavar="DATE", help="drop clue DB rows after DATE")
@@ -157,6 +178,9 @@ def cmd_solve(args: argparse.Namespace) -> int:
     if not puzzle.solver_supported:
         print("This puzzle has multi-letter squares. The solver can't fill it yet.")
         return 1
+    if len(parse_models(args)) > 1:
+        print("solve takes one --model; use eval to compare models.", file=sys.stderr)
+        return 2
     config = EngineConfig.for_mode(args.mode, **engine_changes(args))
     wanted = set(args.sources.split(",")) if args.sources else None
     pool = SourcePool(data_dir())
@@ -248,13 +272,24 @@ def cmd_eval(args: argparse.Namespace) -> int:
         if args.label:
             rows = [r for r in rows if r.get("label") in args.label]
         print(evaluate.table(rows))
+        if len({evaluate.row_model(r) for r in rows}) > 1:
+            print()
+            print(evaluate.compare_table(rows))
         return 0
     files = evaluate.puzzle_files(args.paths)
     if not files:
         print("No puzzle files found.", file=sys.stderr)
         return 1
     modes = [args.mode] if args.mode else ["model", "lookup"]
-    configs = evaluate.make_configs(modes, **engine_changes(args))
+    models = parse_models(args)
+    changes = engine_changes(args)
+    if len(models) > 1:
+        # Model-major, so each model loads once; the previous one is unloaded.
+        configs = [
+            c for m in models for c in evaluate.make_configs(modes, **{**changes, "model": m})
+        ]
+    else:
+        configs = evaluate.make_configs(modes, **changes)
     label = (args.label or ["default"])[0]
     out_dir = Path(args.out) if args.out else data_dir() / "eval"
     rows = evaluate.run_eval(
@@ -264,10 +299,55 @@ def cmd_eval(args: argparse.Namespace) -> int:
         label=label,
         out_dir=out_dir,
         progress=lambda msg: print(msg, file=sys.stderr, flush=True),
+        model_in_name=len(models) > 1,
     )
     print(evaluate.table(rows))
+    if len(models) > 1:
+        print()
+        print(evaluate.compare_table(rows))
     print(f"\nrows written to {out_dir}/eval-{evaluate.slug(label)}-*.json")
     return 0
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    from crossword.solver.models import ModelRegistry
+
+    reg = ModelRegistry()
+    items = reg.list(refresh=True)
+    if reg.error:
+        print(reg.error, file=sys.stderr)
+        return 1
+    if not items:
+        print("No models installed. Run: ollama pull qwen2.5:7b")
+        return 1
+    print(models_table(items, show_all=args.all, vram=reg.vram()))
+    return 0
+
+
+def models_table(items, *, show_all: bool = False, vram: int | None = None) -> str:
+    """The ``crossword models`` listing."""
+    gb = 1024**3
+    lines = [f"{'model':28s}{'size':>9s}{'params':>9s}  {'quant':9s}{'GPU':6s}"]
+    for m in items:
+        if not m.usable and not show_all:
+            continue
+        fits = "?" if m.fits is None else "fits" if m.fits else "no"
+        line = (
+            f"{m.name + (' *' if m.default else ''):28s}{m.size / gb:8.1f}G"
+            f"{m.parameters or '':>9s}  {m.quantization or '':9s}{fits:6s}"
+        )
+        if not m.usable:
+            line += f"  unusable: {m.reason}"
+        lines.append(line.rstrip())
+    hidden = sum(1 for m in items if not m.usable)
+    foot = ["* default"]
+    if vram:
+        foot.append(f"GPU memory {vram / gb:.0f} GB")
+    if hidden and not show_all:
+        foot.append(f"{hidden} unusable model(s) hidden (--all shows them)")
+    lines.append("")
+    lines.append("; ".join(foot))
+    return "\n".join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -319,6 +399,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--table", action="store_true", help="print a table from saved JSON rows")
     add_engine_switches(p)
     p.set_defaults(func=cmd_eval)
+
+    p = sub.add_parser("models", help="list the installed Ollama models that can solve")
+    p.add_argument("--all", action="store_true", help="also list embedding and vision models")
+    p.set_defaults(func=cmd_models)
     return parser
 
 

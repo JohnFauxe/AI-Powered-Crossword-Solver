@@ -38,14 +38,36 @@ uv run crossword serve --port 8765
 ```
 
 Upload a `.puz`, `.ipuz` or native `.json` on the list page, open it and solve
-by hand. The solver bar picks a mode (Model or Lookup), **Solve** streams the
-solver's letters into the grid (Cancel stops it), and **Suggest** lists ranked
-candidates for the current clue. The letters you type are passed to the solver
-as fixed and are never overwritten. Each mode's last run is kept per puzzle.
-Only one solve runs at a time; a second one gets "A solve is already running
-on another puzzle." `/api/health` says which modes are available and why not:
-Ollama stopped or the model not pulled disables Model, a missing clue DB
+by hand. The solver bar picks a mode (Model or Lookup) and one or several
+installed models (the **Models ▾** picker lists what Ollama has, minus
+embedding and vision-only models); **Solve** runs the chosen models one after
+another, streaming each one's letters into the grid (Cancel stops the whole
+queue and keeps finished runs), and **Suggest** lists ranked candidates for
+the current clue. Between models the previous one is unloaded so they never
+share the GPU. The letters you type are passed to the solver as fixed and are
+never overwritten. The last run per (mode, model) is kept per puzzle, one card
+each: click a card to show its letters, and **Compare with…** marks where two
+runs disagree. When Ollama is slow (loading a model, or busy) the status says
+so with a running count of seconds, and failed model requests show a warning.
+Only one solve or benchmark runs at a time; a second one gets a 409 ("A solve
+is already running on another puzzle."). `/api/health` says which modes are
+available and why not: Ollama stopped disables Model, a missing clue DB
 disables Lookup. Hand-solving works with neither.
+
+**Benchmark** (link on the puzzle list, `bench.html`): choose models, modes
+and puzzles with stored solutions, optionally ignoring the answer cache for
+fair timing, and run them as one queued job (model by model, so each loads
+once). Results come as a sortable table (letters, words and time per puzzle,
+means, total) and a bar chart, and are saved to `data/bench/<timestamp>.json`;
+past benchmarks can be reopened.
+
+Per-model Ollama settings live in `MODEL_PROFILES` in
+`src/crossword/solver/models.py` (glob on the model name → `OllamaConfig`
+overrides).
+
+For UI work without Ollama, `CROSSWORD_FAKE_MODELS=1 uv run crossword serve`
+swaps in fake models that answer from the stored puzzles' solutions (one slow
+to load, one with failing requests). Never use it for real results.
 
 ## Command line
 
@@ -57,6 +79,8 @@ uv run crossword serve [--port 8000]
 uv run crossword solve puzzle.puz [--mode model|lookup] [--json run.json]
 uv run crossword eval data/samples/ [--mode model|lookup] [--label NAME] [switches]
 uv run crossword eval --table data/eval/eval-*.json   # table from saved rows
+uv run crossword eval data/samples/ --mode model --model qwen2.5:7b,gemma3:12b  # compare models
+uv run crossword models [--all]             # installed models that can solve
 ```
 
 `solve` prints the fill (lowercase where confidence is below 0.5), letter and
@@ -77,7 +101,7 @@ accepted by `solve`):
 | `--no-verify` | no yes/no verification (technique 4) |
 | `--fewshot off\|other_length\|any` | few-shot examples from the clue DB; `any` can show the answer itself and is labelled **LEAKY** in model mode |
 | `--samples N` | first-pass requests per clue (technique 2) |
-| `--model NAME` | another Ollama model |
+| `--model NAME` | another Ollama model; `eval` takes several (repeat or comma-separate) and adds a model × puzzle comparison table, unloading each model before the next |
 | `--rounds N`, `--time-budget S` | refine rounds (default 6) and the overall budget (default 600 s) |
 | `--exclude-after DATE`, `--exclude-source NAME` | clue DB filters (lookup, few-shot, vocabulary) |
 | `--set key=value` | any `EngineConfig` field, for tuning |
@@ -268,8 +292,9 @@ named by `CROSSWORD_DATA`:
 
 ```
 data/puzzles/<id>.json         stored puzzles (native JSON)
-data/progress/<id>.json        your letters and the last solver run per mode
-data/logs/<id>-<mode>.json     per-slot solver log of the last run (never served)
+data/progress/<id>.json        your letters and the last solver run per (mode, model)
+data/logs/<id>-<mode>-<model>.json  per-slot solver log of the last run (never served)
+data/bench/<timestamp>.json    benchmark settings and results
 data/cluedb.sqlite             clue database (scripts/build_cluedb.py)
 data/cache.sqlite              cached model answers
 data/eval/                     eval results
