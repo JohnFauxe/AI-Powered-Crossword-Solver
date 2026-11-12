@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn",
     "puzpy",
     "httpx",
+    "numpy>=2.5.4",
 ]
 
 [project.scripts]

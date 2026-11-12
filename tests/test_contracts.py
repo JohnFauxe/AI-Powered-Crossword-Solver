@@ -3,8 +3,6 @@
 import ast
 from pathlib import Path
 
-import pytest
-
 from crossword.solver import search
 from crossword.solver.candidates.base import Candidate
 
@@ -17,8 +15,10 @@ def test_search_contract_shapes():
     )
     assert problem.slots[0].length == 3
     assert problem.options == search.SearchOptions(time_limit=5.0, seed=0)
-    with pytest.raises(NotImplementedError):
-        search.search(problem)
+    result = search.search(problem)
+    fill = result.slots["1-across"]
+    assert (fill.answer, fill.source) == ("CAT", "wordlist")
+    assert result.cells[(0, 0)] == search.CellFill("C", 1.0)
 
 
 def test_search_imports_nothing_impure():
