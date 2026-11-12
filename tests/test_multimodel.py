@@ -312,3 +312,73 @@ def test_bench_refusals(store):
         assert c.post("/api/bench", json={"models": ["zz:1b"], "puzzles": [pid]}).status_code == 422
         assert c.get("/api/bench/../etc").status_code == 404
         assert c.get("/api/bench/20260101-000000").status_code == 404
+
+
+# -------------------------------------------------------------------- CLI
+
+
+def test_cli_parses_several_models():
+    from crossword import cli
+
+    args = cli.build_parser().parse_args(
+        ["eval", "x", "--model", "a:1b,b:2b", "--model", "c:3b", "--model", "a:1b"])
+    assert cli.parse_models(args) == ["a:1b", "b:2b", "c:3b"]
+    assert "model" not in cli.engine_changes(args)  # one config per model instead
+    one = cli.build_parser().parse_args(["solve", "x", "--model", "m"])
+    assert cli.engine_changes(one)["model"] == "m"
+    assert cli.main(["solve", str(MINI), "--model", "a,b"]) == 2
+
+
+def test_cli_eval_several_models_and_compare_table(tmp_path, monkeypatch, capsys):
+    from crossword import cli
+    from crossword.server import jobs as jobs_module
+    from crossword.solver import models as models_module
+
+    rec = Recorder()
+    unloaded = []
+
+    class Reg:
+        def __init__(self, *a, **k):
+            pass
+
+        def unload(self, name):
+            unloaded.append(name)
+            return True
+
+    monkeypatch.setattr(jobs_module, "SourcePool", lambda root: rec)
+    monkeypatch.setattr(models_module, "ModelRegistry", Reg)
+    monkeypatch.setenv("CROSSWORD_DATA", str(tmp_path / "data"))
+    out = tmp_path / "rows"
+    code = cli.main(["eval", str(MINI), str(MIDI), "--mode", "model", "--model",
+                     "qwen2.5:7b,gemma3:12b", "--rounds", "1", "--set", "search_max=0.2",
+                     "--set", "search_min=0.1", "--out", str(out)])
+    assert code == 0
+    assert rec.models == ["qwen2.5:7b", "qwen2.5:7b", "gemma3:12b", "gemma3:12b"]
+    assert unloaded == ["qwen2.5:7b"]
+    text = capsys.readouterr().out
+    lines = text.splitlines()
+    head = next(i for i, x in enumerate(lines) if x.startswith("model ") and "mean L" in x)
+    assert "midi_7x7" in lines[head] and "mini_5x5" in lines[head]
+    body = lines[head + 2: head + 4]
+    assert [x.split()[0] for x in body] == ["gemma3:12b", "qwen2.5:7b"]
+    assert "100%/100%" in body[0] and "*" in body[0]
+    names = sorted(p.name for p in out.iterdir())
+    assert "eval-default-gemma3-12b-model-mini_5x5.json" in names and len(names) == 4
+    # --table on the saved rows prints the comparison too
+    assert cli.main(["eval", "--table", *map(str, out.iterdir())]) == 0
+    assert "best mean letters" in capsys.readouterr().out
+
+
+def test_cli_models_listing(monkeypatch, capsys):
+    from crossword import cli
+    from crossword.server.fakes import FakeRegistry
+    from crossword.solver import models as models_module
+
+    reg = FakeRegistry()
+    monkeypatch.setattr(models_module, "ModelRegistry", lambda: reg)
+    assert cli.main(["models"]) == 0
+    out = capsys.readouterr().out
+    assert "fake-good:7b *" in out and "fake-vl" not in out and "2 unusable" in out
+    assert cli.main(["models", "--all"]) == 0
+    out = capsys.readouterr().out
+    assert "fake-vl:7b" in out and "unusable: Vision model" in out
