@@ -34,9 +34,12 @@
     </div>
     <p class="solver-warn" id="solver-warn" role="alert" hidden></p>
     <div class="runs" id="runs" aria-label="Solver runs: choose one to show its letters"></div>
-    <label class="compare-wrap"><span class="visually-hidden">Compare the shown run with</span>
-      <select id="compare" class="select" disabled><option value="">Compare with…</option></select>
-    </label>
+    <div class="compare-wrap">
+      <label class="compare-select"><span class="visually-hidden">Compare the shown run with</span>
+        <select id="compare" class="select" disabled><option value="">Compare with…</option></select>
+      </label>
+      <label class="check"><input type="checkbox" id="compare-answers" disabled> Compare with answers</label>
+    </div>
     <div class="solver-progress" hidden></div>
   </section>
 

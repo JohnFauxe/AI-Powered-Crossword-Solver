@@ -67,6 +67,7 @@ export function initSolver(context) {
   el.warn = root.querySelector("#solver-warn");
   el.runs = root.querySelector("#runs");
   el.compare = root.querySelector("#compare");
+  el.compareAnswers = root.querySelector("#compare-answers");
   el.progress = root.querySelector(".solver-progress");
   el.picker = root.querySelector("#model-btn");
   el.pickerPop = root.querySelector("#model-pop");
@@ -98,6 +99,13 @@ export function initSolver(context) {
   el.compare.addEventListener("change", () => {
     S.compare = el.compare.value || null;
     renderRuns();
+    ctx.render();
+    refreshStatus();
+  });
+  el.compareAnswers.addEventListener("change", () => {
+    S.compareAnswers = el.compareAnswers.checked;
+    renderRuns();
+    renderCompare();
     ctx.render();
     refreshStatus();
   });
@@ -153,7 +161,13 @@ function defaultStatus() {
   }
   const low = lowCount(run.key);
   const tail = low ? ` ${low} low-confidence cell${low === 1 ? "" : "s"}.` : "";
-  const cmp = S.diffActive() ? ` Marking where it disagrees with ${runLabel(S.compare)}.` : "";
+  let cmp = S.diffActive() ? ` Marking where it disagrees with ${runLabel(S.compare)}.` : "";
+  if (S.answersActive()) {
+    const aw = S.answerWrong;
+    const n = aw?.run === run.key ? aw.wrong.size : null;
+    cmp = n === null ? " Checking it against the answers…"
+      : ` ${n} cell${n === 1 ? "" : "s"} wrong compared with the answers, marked.`;
+  }
   return `Showing the ${runLabel(run.key)} run.${tail}${cmp}`;
 }
 
@@ -374,7 +388,7 @@ function cardFor(run, state) {
   card.dataset.key = k;
   card.setAttribute("aria-pressed", S.shown === k ? "true" : "false");
   card.classList.toggle("current", S.shown === k);
-  card.classList.toggle("compared", S.compare === k && S.shown !== k);
+  card.classList.toggle("compared", !S.compareAnswers && S.compare === k && S.shown !== k);
   const title = document.createElement("b");
   const dot = document.createElement("span");
   dot.className = `dot ${run.mode}`;
@@ -467,8 +481,62 @@ function renderCompare() {
   sel.replaceChildren(...opts);
   sel.value = S.compare && others.some((r) => r.key === S.compare) ? S.compare : "";
   if (!sel.value) S.compare = null;
-  sel.disabled = !others.length || !S.shown;
-  sel.title = sel.disabled ? "Two runs are needed to compare them" : "Mark cells where the shown run disagrees with another";
+  sel.disabled = !others.length || !S.shown || S.compareAnswers;
+  sel.title = S.compareAnswers ? "Untick “Compare with answers” to compare two runs"
+    : sel.disabled ? "Two runs are needed to compare them" : "Mark cells where the shown run disagrees with another";
+  const box = el.compareAnswers;
+  const hasSolution = !!S.puzzle?.has_solution;
+  box.disabled = !hasSolution || !S.shown;
+  box.checked = S.compareAnswers;
+  box.parentElement.title = !hasSolution ? "This puzzle has no stored solution"
+    : !S.shown ? "Show a run to compare it with the answers"
+    : "Mark cells where the shown run is wrong compared with the stored solution";
+}
+
+// ------------------------------------------------------- compare with answers
+
+let answerFetch = null; // signature being checked right now
+
+function layerSignature(k) {
+  const parts = [];
+  for (const [cell, v] of S.layers[k] || []) parts.push(cell + v.letter);
+  return k + "#" + parts.sort().join(";");
+}
+
+/**
+ * Keep S.answerWrong in step with the shown run while "Compare with answers"
+ * is on. The server checks the run's letters (POST /check with those letters,
+ * which saves nothing) and returns only the wrong cells, so the solution stays
+ * on the server. Called after every grid render; does nothing when the shown
+ * run's letters haven't changed since the last check.
+ */
+export function syncAnswers() {
+  if (!S.answersActive()) return;
+  const k = S.shown;
+  const sig = layerSignature(k);
+  if (S.answerWrong?.sig === sig || answerFetch === sig) return;
+  answerFetch = sig;
+  const letters = new Map();
+  for (const [cell, v] of S.layers[k] || []) letters.set(cell, v.letter);
+  api.check(S.id, "all", letters).then(
+    (res) => {
+      // Keep even a superseded result (a live run moves on): it is nearly
+      // current. If an older check lands last, the render below sees the
+      // signature mismatch and checks again.
+      S.answerWrong = { run: k, sig, wrong: new Set(res.wrong.map(([r, c]) => key(r, c))) };
+      if (answerFetch === sig) answerFetch = null;
+      ctx.render();
+      if (!statusOverride) refreshStatus();
+    },
+    (e) => {
+      if (answerFetch !== sig) return;
+      answerFetch = null;
+      S.compareAnswers = false;
+      renderCompare();
+      ctx.render();
+      setStatus(`Couldn't check the run against the answers: ${e.message}`);
+    },
+  );
 }
 
 function renderBar() {

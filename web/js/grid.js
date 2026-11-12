@@ -123,6 +123,8 @@ export function renderGrid() {
   const layer = S.shownLayer();
   const mode = S.shownMode();
   const other = S.diffActive() ? S.layers[S.compare] : null;
+  const aw = S.answerWrong;
+  const wrongVsAnswers = S.answersActive() && aw?.run === S.shown ? aw.wrong : null;
   for (const [k, d] of cells) {
     const user = S.user.get(k);
     const sol = user ? null : layer.get(k);
@@ -144,6 +146,8 @@ export function renderGrid() {
     if (other && !user) {
       const a = layer.get(k), b2 = other.get(k);
       diff = !!(a && b2 && a.letter !== b2.letter);
+    } else if (wrongVsAnswers && !user) {
+      diff = wrongVsAnswers.has(k);
     }
     cls.toggle("diff", diff);
     d.tabIndex = k === cur ? 0 : -1;
@@ -168,7 +172,7 @@ function cellLabel(k, user, sol, b, diff) {
     parts.push("empty");
   }
   if (S.wrong.has(k)) parts.push("wrong");
-  if (diff) parts.push("runs disagree");
+  if (diff) parts.push(S.answersActive() ? "wrong compared with the answers" : "runs disagree");
   if (S.circles.has(k)) parts.push("circled");
   return parts.join(", ");
 }

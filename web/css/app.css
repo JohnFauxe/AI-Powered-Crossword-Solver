@@ -155,7 +155,8 @@ button, input { font: inherit; color: inherit; }
   max-width: 100%;
 }
 .select:disabled { opacity: .5; cursor: not-allowed; }
-.compare-wrap { display: inline-flex; min-width: 0; }
+.compare-wrap { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
+.compare-select { display: inline-flex; min-width: 0; }
 .solver-warn { color: var(--warn); font-size: 13px; margin: 0; }
 .solver-warn::before { content: "⚠ "; }
 .picker-wrap { position: relative; display: inline-block; min-width: 0; }

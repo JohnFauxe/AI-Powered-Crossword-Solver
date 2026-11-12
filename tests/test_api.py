@@ -210,6 +210,23 @@ def test_check_solved(client, mini_id):
     assert body == {"wrong": [], "checked": len(letters), "solved": True}
 
 
+def test_check_run_letters_leaves_progress_alone(client, mini_id):
+    """'Compare with answers' sends a solver run's letters to check: the reply
+    names only wrong cells (no solution letters) and saved progress is kept."""
+    puzzle = load(MINI)
+    cells = puzzle.open_cells()
+    run = [[r, c, "Z" if puzzle.solution_at(r, c) != "Z" else "Y"] for r, c in cells[:3]]
+    mine = [[*cells[5], puzzle.solution_at(*cells[5])]]
+    client.put(f"/api/puzzles/{mini_id}/progress", json={"letters": mine})
+    body = client.post(
+        f"/api/puzzles/{mini_id}/check", json={"cells": "all", "letters": run}
+    ).json()
+    assert body["wrong"] == [list(x) for x in cells[:3]]
+    assert set(body) == {"wrong", "checked", "solved"}
+    # The saved progress is still just the person's one letter.
+    assert client.post(f"/api/puzzles/{mini_id}/check", json={}).json()["checked"] == 1
+
+
 def test_reveal(client, mini_id):
     puzzle = load(MINI)
     url = f"/api/puzzles/{mini_id}/reveal"

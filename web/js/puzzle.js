@@ -36,6 +36,8 @@ const S = {
   runs: [], // stored runs, each {key, mode, model, fill, accuracy, ...}
   shown: null, // run key whose letters the grid shows
   compare: null, // run key the shown run is compared against
+  compareAnswers: false, // compare the shown run with the stored solution instead
+  answerWrong: null, // {run, sig, wrong: Set("r,c")}: the shown run's cells the server says are wrong
   mode: "model", // mode of the next Solve
   models: [], // models of the next Solve, in order
   cur: { r: 0, c: 0 },
@@ -61,7 +63,11 @@ const S = {
   shownMode() {
     return this.shown ? this.shown.split("|")[0] : this.mode;
   },
+  answersActive() {
+    return !!(this.compareAnswers && this.shown && this.puzzle?.has_solution);
+  },
   diffActive() {
+    if (this.compareAnswers) return false;
     return !!(this.compare && this.shown && this.compare !== this.shown && this.layers[this.compare]);
   },
   formatTime() {
@@ -157,6 +163,7 @@ function loadError(text) {
 
 function render() {
   renderGrid();
+  solver.syncAnswers();
   renderClues();
   scrollActiveIntoView();
   if (document.activeElement === $("kbd")) placeInput();
