@@ -194,7 +194,7 @@ def run_eval(
                 out_dir.mkdir(parents=True, exist_ok=True)
                 mid = f"{model_slug(config.model)}-" if model_in_name else ""
                 name = f"eval-{slug(label)}-{mid}{config.mode}-{path.stem}.json"
-                (out_dir / name).write_text(json.dumps(row.as_json(), indent=1))
+                (out_dir / name).write_text(json.dumps(row.as_json(), indent=1), encoding="utf-8")
             if progress:
                 progress(format_row(row))
     return rows
@@ -267,7 +267,7 @@ def load_rows(paths: Iterable[str | Path]) -> list[dict[str, Any]]:
     out = []
     for p in paths:
         try:
-            out.append(json.loads(Path(p).read_text()))
+            out.append(json.loads(Path(p).read_text(encoding="utf-8")))
         except (OSError, ValueError):
             continue
     return out

@@ -15,9 +15,13 @@ from pathlib import Path
 
 from crossword.model import Puzzle
 from crossword.solver.candidates.base import Candidate, normalize_answer
+from crossword.solver.candidates.wordlist import default_dicts
 from crossword.solver.search import SearchInput, SearchOptions, SearchResult, SearchSlot
 
-DICT_PATH = Path(os.environ.get("CROSSWORD_DICT", "/usr/share/dict/american-english"))
+DICT_PATH = Path(
+    os.environ.get("CROSSWORD_DICT")
+    or next((p for p in default_dicts() if p.exists()), "/usr/share/dict/american-english")
+)
 SAMPLES_DIR = Path(
     os.environ.get(
         "CROSSWORD_SAMPLES",

@@ -7,10 +7,13 @@ import pytest
 
 from crossword.formats import load
 from crossword.model import Clue, Puzzle, display_slot_id, parse_slot_id, slot_id
+from crossword.solver.candidates.wordlist import default_dicts
 
 from conftest import BROKEN_FIXTURES, FIXTURES, VALID_FIXTURES
 
-DICT = Path("/usr/share/dict/american-english")
+DICT = next(
+    (p for p in default_dicts() if p.exists()), Path("/usr/share/dict/american-english")
+)
 
 
 # ----------------------------------------------------------------- slot ids
@@ -124,10 +127,11 @@ def test_fixtures_are_american_style(path):
     assert len(answers) == len(set(answers)), "duplicate entry"
 
 
-@pytest.mark.skipif(not DICT.exists(), reason="system word list missing")
+@pytest.mark.skipif(not DICT.exists(), reason="no word list (scripts/build_wordlist.py)")
 @pytest.mark.parametrize("path", VALID_FIXTURES, ids=lambda p: p.name)
 def test_fixture_entries_are_dictionary_words(path):
-    words = {w.strip().upper() for w in DICT.read_text().split() if re.fullmatch(r"[a-z]+", w)}
+    text = DICT.read_text("utf-8")
+    words = {w.strip().upper() for w in text.split() if re.fullmatch(r"[a-z]+", w)}
     p = load(path)
     for s in p.slots:
         assert p.answer(s.id) in words, s.id

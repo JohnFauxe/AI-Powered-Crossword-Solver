@@ -255,7 +255,7 @@ def cmd_solve(args: argparse.Namespace) -> int:
     if args.json:
         import json
 
-        with open(args.json, "w") as fh:
+        with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(rec, fh, indent=1)
         print(f"run and per-slot log written to {args.json}")
     return 0 if rec["status"] == "done" else 1

@@ -1,9 +1,11 @@
 """Pattern match against a word list: the fallback source.
 
-Words come from the system dictionaries (``/usr/share/dict/american-english``
-and ``british-english``) plus, when it is built, the clue DB's distinct
-answers with their frequencies (answers only, never clues, so this is fair
-game in ``model`` mode). Score is low and flat, nudged up by frequency:
+Words come from ``$CROSSWORD_DATA/words.txt`` (built by
+``scripts/build_wordlist.py`` from SCOWL, on any OS), the system dictionaries
+(``/usr/share/dict/american-english`` and ``british-english``) when present,
+plus, when it is built, the clue DB's distinct answers with their
+frequencies (answers only, never clues, so this is fair game in ``model``
+mode). Score is low and flat, nudged up by frequency:
 ``base_score + freq_weight * log1p(freq)``.
 
 The index is one newline-separated string per word length, ordered by
@@ -27,10 +29,17 @@ from crossword.solver.candidates.base import Candidate, normalize_answer
 if TYPE_CHECKING:
     from crossword.solver.candidates.cluedb import ClueDB
 
-DEFAULT_DICTS = (
+SYSTEM_DICTS = (
     Path("/usr/share/dict/american-english"),
     Path("/usr/share/dict/british-english"),
 )
+
+
+def default_dicts() -> tuple[Path, ...]:
+    """The built word list, then the system dictionaries; missing files are skipped."""
+    from crossword.store import data_dir
+
+    return (data_dir() / "words.txt", *SYSTEM_DICTS)
 MAX_LENGTH = 30
 
 
@@ -43,10 +52,11 @@ class _Bucket:
 class WordList:
     """``wordlist`` candidate source.
 
-    ``paths``: plain word files (one word per line; possessives ``'s`` are
-    skipped). ``cluedb``: a :class:`ClueDB` whose ``vocabulary()`` is merged
-    in (its exclusion filters apply); ``"auto"`` (default) opens the default
-    clue DB if it is built. ``words``: extra ``(word, freq)`` pairs, mainly for
+    ``paths``: plain word files, one word per line (default
+    :func:`default_dicts`; possessives ``'s`` are skipped). ``cluedb``: a
+    :class:`ClueDB` whose ``vocabulary()`` is merged in (its exclusion
+    filters apply); ``"auto"`` (default) opens the default clue DB if it is
+    built. ``words``: extra ``(word, freq)`` pairs, mainly for
     tests. ``max_candidates`` caps ``candidates()``.
     """
 
@@ -54,7 +64,7 @@ class WordList:
 
     def __init__(
         self,
-        paths: Iterable[str | Path] = DEFAULT_DICTS,
+        paths: Iterable[str | Path] | None = None,
         *,
         cluedb: ClueDB | None | str = "auto",
         words: Iterable[tuple[str, int]] = (),
@@ -63,7 +73,7 @@ class WordList:
         dict_freq: int = 1,
         max_candidates: int = 500,
     ) -> None:
-        self.paths = tuple(Path(p) for p in paths)
+        self.paths = tuple(Path(p) for p in (default_dicts() if paths is None else paths))
         self._cluedb_arg = cluedb
         self._extra = list(words)
         self.base_score = base_score
