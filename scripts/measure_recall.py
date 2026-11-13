@@ -323,7 +323,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"wall={wall:.0f}s",
                 flush=True,
             )
-        (eval_dir / f"recall-{path.stem}.json").write_text(json.dumps(detail, indent=1))
+        (eval_dir / f"recall-{path.stem}.json").write_text(
+            json.dumps(detail, indent=1), encoding="utf-8"
+        )
 
     print()
     print("| puzzle | setting | n | r@1 | r@5 | r@20 | mean cands | s/clue |")

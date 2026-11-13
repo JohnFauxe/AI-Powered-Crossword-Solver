@@ -239,7 +239,7 @@ def fake_sources(
     ``dictionaries``: the vocabulary also has the system word lists (as in a
     real solve), so the search can't fill the grid from the answers alone and
     the fake models' hit rates show in the scores."""
-    from crossword.solver.candidates.wordlist import DEFAULT_DICTS, WordList
+    from crossword.solver.candidates.wordlist import WordList, default_dicts
 
     built: dict[frozenset[str], WordList] = {}
 
@@ -249,7 +249,7 @@ def fake_sources(
         key = frozenset(w for w, _ in words)
         if key not in built:
             built.clear()
-            paths = DEFAULT_DICTS if dictionaries else ()
+            paths = default_dicts() if dictionaries else ()
             built[key] = WordList(paths=paths, cluedb=None, words=words)
             built[key].available()
         wl = built[key]
