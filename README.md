@@ -44,7 +44,8 @@ From a fresh clone or pull:
 Skip step 3 only if you just want to solve by hand: that works with none of
 it. If a solver
 mode is greyed out, http://127.0.0.1:8000/api/health says why (Ollama not
-running disables Model mode; a missing clue DB disables Lookup mode).
+running disables Model mode; a missing clue DB disables Lookup mode). With
+no word list, Model mode still runs but the solver bar shows a warning.
 
 ## What it does
 

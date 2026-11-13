@@ -209,7 +209,25 @@ def check_cluedb(store: Store) -> HealthCheck:
     def check() -> tuple[bool, str | None]:
         if (store.root / "cluedb.sqlite").is_file():
             return True, None
-        return False, "Clue database not built. Run scripts/build_cluedb.py"
+        return False, "Clue database not built. Run: uv run python scripts/setup_data.py"
+
+    return check
+
+
+def check_wordlist(store: Store) -> HealthCheck:
+    """A word list for Model mode: ``<data>/words.txt``, a system dictionary, or
+    the clue DB's answers. Without one Model mode still runs, but much worse."""
+
+    def check() -> tuple[bool, str | None]:
+        from crossword.solver.candidates.wordlist import SYSTEM_DICTS
+
+        paths = (store.root / "words.txt", store.root / "cluedb.sqlite", *SYSTEM_DICTS)
+        if any(p.is_file() for p in paths):
+            return True, None
+        return False, (
+            "No word list, so Model mode will fill far fewer letters. "
+            "Run: uv run python scripts/setup_data.py --no-cluedb"
+        )
 
     return check
 
@@ -253,8 +271,9 @@ def create_app(
 
     ``store`` defaults to ``Store()`` (``$CROSSWORD_DATA`` or ``<repo>/data``).
     ``health_checks`` maps a source name to a no-argument callable returning
-    ``(available, reason)``; the defaults check ``<data>/cluedb.sqlite`` and
-    Ollama's ``/api/tags``. ``web_dir=None`` skips the static files.
+    ``(available, reason)``; the defaults check ``<data>/cluedb.sqlite``, a
+    word list (:func:`check_wordlist`) and Ollama's ``/api/tags``.
+    ``web_dir=None`` skips the static files.
 
     ``jobs`` runs solves (default: :class:`Jobs` over the store, with the real
     sources); tests pass one with fake sources. ``registry`` lists the
@@ -267,6 +286,7 @@ def create_app(
     store = store or Store()
     checks = health_checks or {
         "cluedb": check_cluedb(store),
+        "wordlist": check_wordlist(store),
         # Ollama up; whether the chosen models are installed is checked per solve.
         "ollama": check_ollama(model=None),
     }
@@ -471,8 +491,12 @@ def create_app(
     def modes_from(sources: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         ollama = sources.get("ollama", {"available": False, "reason": "Not checked"})
         cluedb = sources.get("cluedb", {"available": False, "reason": "Not checked"})
+        wordlist = sources.get("wordlist", {"available": True, "reason": None})
+        model = dict(ollama)
+        if ollama["available"] and not wordlist["available"]:
+            model["warning"] = wordlist["reason"]  # runs, but much worse
         return {
-            "model": ollama,
+            "model": model,
             "lookup": (
                 cluedb
                 if cluedb["available"]

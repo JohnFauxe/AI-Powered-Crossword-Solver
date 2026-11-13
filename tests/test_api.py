@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crossword.formats import dumps, load
-from crossword.server.app import check_cluedb, check_ollama, create_app
+from crossword.server.app import check_cluedb, check_ollama, check_wordlist, create_app
 from crossword.solver.engine import REBUS_MESSAGE
 from crossword.store import Store
 
@@ -308,11 +308,11 @@ def test_runs_missing_puzzle(client):
 def test_health_reports_missing_sources(client):
     body = client.get("/api/health").json()
     assert body["sources"]["cluedb"]["available"] is False
-    assert "build_cluedb" in body["sources"]["cluedb"]["reason"]
+    assert "setup_data" in body["sources"]["cluedb"]["reason"]
     assert body["sources"]["ollama"] == {"available": False, "reason": "Ollama is off"}
     assert body["modes"]["model"]["available"] is False
     assert body["modes"]["lookup"]["reason"].startswith("Clue database not built")
-    assert "build_cluedb" in body["modes"]["lookup"]["hint"]
+    assert "setup_data" in body["modes"]["lookup"]["hint"]
 
 
 def test_health_cluedb_present(client, store):
@@ -331,7 +331,38 @@ def test_ollama_check_unreachable():
 def test_default_health_checks_run(store):
     client = TestClient(create_app(store, registry=test_registry()))
     body = client.get("/api/health").json()
-    assert set(body["sources"]) == {"cluedb", "ollama"}
+    assert set(body["sources"]) == {"cluedb", "wordlist", "ollama"}
+
+
+def test_wordlist_check(store, monkeypatch):
+    import crossword.solver.candidates.wordlist as wl
+
+    monkeypatch.setattr(wl, "SYSTEM_DICTS", ())
+    store.root.mkdir(parents=True, exist_ok=True)
+    ok, reason = check_wordlist(store)()
+    assert ok is False and "setup_data" in reason
+    (store.root / "words.txt").write_text("cat\n", encoding="utf-8")
+    assert check_wordlist(store)() == (True, None)
+
+
+@pytest.mark.parametrize("ollama_up", [True, False])
+def test_model_mode_warns_without_wordlist(store, ollama_up):
+    checks = {
+        "cluedb": lambda: (False, "no db"),
+        "wordlist": lambda: (False, "No word list"),
+        "ollama": lambda: (True, None) if ollama_up else (False, "Ollama is off"),
+    }
+    client = TestClient(create_app(store, health_checks=checks, registry=test_registry()))
+    model = client.get("/api/health").json()["modes"]["model"]
+    assert model["available"] is ollama_up
+    # The warning only matters when Model mode can run at all.
+    assert model.get("warning") == ("No word list" if ollama_up else None)
+
+
+def test_model_mode_no_warning_with_wordlist(store):
+    checks = {"wordlist": lambda: (True, None), "ollama": lambda: (True, None)}
+    client = TestClient(create_app(store, health_checks=checks, registry=test_registry()))
+    assert "warning" not in client.get("/api/health").json()["modes"]["model"]
 
 
 # -------------------------------------------------------------------- solver
