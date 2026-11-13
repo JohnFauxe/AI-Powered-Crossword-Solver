@@ -179,7 +179,11 @@ export async function loadHealth() {
     const h = await api.health();
     for (const mode of MODES) {
       const m = h.modes?.[mode];
-      if (m) availability[mode] = { available: !!m.available, reason: m.reason || null, hint: m.hint || null };
+      if (m) {
+        availability[mode] = {
+          available: !!m.available, reason: m.reason || null, hint: m.hint || null, warning: m.warning || null,
+        };
+      }
     }
     // A job still going on this puzzle (page reloaded mid-run): follow it again.
     const live = h.running;
@@ -196,6 +200,12 @@ export async function loadHealth() {
   }
   renderBar();
   refreshStatus();
+  showModeWarning();
+}
+
+/** A mode that runs but degraded (Model mode with no word list): say so while idle. */
+function showModeWarning() {
+  if (!running) setWarning(availability[S.mode].warning);
 }
 
 /** Read /api/models; keep the remembered selection where still usable. */
@@ -351,6 +361,7 @@ export function showRun(k, { remember = true } = {}) {
   renderBar();
   ctx.render();
   refreshStatus();
+  showModeWarning();
 }
 
 /** The mode of the next Solve. Never starts a run. */
